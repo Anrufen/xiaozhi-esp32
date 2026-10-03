@@ -13,6 +13,7 @@ void OggDemuxer::Reset()
         .head_seen = false,
         .tags_seen = false,
         .mono = false,
+        .channels = 1,
         .sample_rate = 48000
     };
 
@@ -79,7 +80,8 @@ int OggDemuxer::GetOpusPacketDurationMs(const uint8_t* data, size_t size) {
 }
 
 bool OggDemuxer::Finish() const {
-    return !has_error_ && opus_info_.head_seen && opus_info_.tags_seen && opus_info_.mono &&
+    return !has_error_ && opus_info_.head_seen && opus_info_.tags_seen &&
+           (opus_info_.channels == 1 || opus_info_.channels == 2) &&
            packet_count_ > 0 && state_ == ParseState::FIND_PAGE && ctx_.bytes_needed == 4 &&
            ctx_.packet_len == 0;
 }
@@ -297,7 +299,8 @@ size_t OggDemuxer::Process(const uint8_t* data, size_t size)
                             if (ctx_.packet_len >=8 && memcmp(ctx_.packet_buf, "OpusHead", 8) == 0) {
                                 opus_info_.head_seen = true;
                                 if (ctx_.packet_len >= 19) {
-                                    opus_info_.mono = ctx_.packet_buf[9] == 1;
+                                    opus_info_.channels = ctx_.packet_buf[9];
+                                    opus_info_.mono = (opus_info_.channels == 1);
                                     const uint32_t input_sample_rate =
                                         static_cast<uint32_t>(ctx_.packet_buf[12]) |
                                         (static_cast<uint32_t>(ctx_.packet_buf[13]) << 8) |
@@ -317,9 +320,11 @@ size_t OggDemuxer::Process(const uint8_t* data, size_t size)
                                             opus_info_.sample_rate = 48000;
                                             break;
                                     }
-                                    ESP_LOGD(TAG, "OpusHead found, sample_rate=%d", opus_info_.sample_rate);
-                                    if (!opus_info_.mono) {
-                                        ESP_LOGE(TAG, "Only mono Ogg Opus streams are supported");
+                                    ESP_LOGD(TAG, "OpusHead found, sample_rate=%d, channels=%d",
+                                             opus_info_.sample_rate, opus_info_.channels);
+                                    if (opus_info_.channels != 1 && opus_info_.channels != 2) {
+                                        ESP_LOGE(TAG, "Only mono and stereo Ogg Opus streams are supported, got channels=%d",
+                                                 opus_info_.channels);
                                         has_error_ = true;
                                         return processed;
                                     }

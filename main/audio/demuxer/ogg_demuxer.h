@@ -20,6 +20,7 @@ private:
         bool    head_seen{false};
         bool    tags_seen{false};
         bool    mono{false};
+        int     channels{1};
         int     sample_rate{48000};
     };
 

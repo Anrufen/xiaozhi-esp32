@@ -1,0 +1,2275 @@
+#include "custom_lcd_display.h"
+#include "player_icons.h"
+#include <material_symbols.h>
+#include "application.h"
+#include "assets/lang_config.h"
+#include "audio/demuxer/ogg_demuxer.h"
+#include "board.h"
+#include "config.h"
+#include "lvgl_theme.h"
+#include "wifi_manager.h"
+
+#include <esp_log.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <cJSON.h>
+#include <cmath>
+#include <cstdlib>
+#include <ctime>
+#include <vector>
+
+#define TAG "CustomLcdDisplay"
+
+// 编译期常驻 Flash ROData 的大号与小号字体
+LV_FONT_DECLARE(font_maison_neue_book_14);
+LV_FONT_DECLARE(font_maison_neue_book_26);
+LV_FONT_DECLARE(font_noto_sans_basic_30_4);
+LV_FONT_DECLARE(font_noto_sans_basic_20_4);
+LV_FONT_DECLARE(font_noto_sans_basic_16_4);
+LV_FONT_DECLARE(font_material_symbols_16_4);
+LV_FONT_DECLARE(font_material_symbols_30_4);
+
+// 走势图采样点（宽幅展开至 260px，高 26px）
+static const lv_point_precise_t kSparklinePoints[] = {
+    {0, 20}, {36, 17}, {74, 22}, {112, 14}, {150, 16}, {188, 8}, {226, 12}, {260, 4}
+};
+
+CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
+                                   int width, int height, int offset_x, int offset_y, bool mirror_x,
+                                   bool mirror_y, bool swap_xy)
+    : SpiLcdDisplay(panel_io, panel, width, height, offset_x, offset_y, mirror_x, mirror_y,
+                    swap_xy) {}
+
+CustomLcdDisplay::~CustomLcdDisplay() {
+    if (clock_timer_) {
+        lv_timer_delete(clock_timer_);
+        clock_timer_ = nullptr;
+    }
+    if (player_anim_timer_) {
+        lv_timer_delete(player_anim_timer_);
+        player_anim_timer_ = nullptr;
+    }
+}
+
+void CustomLcdDisplay::SetupUI() {
+    // 1. 调用基类 SetupUI 初始化核心屏幕组件
+    SpiLcdDisplay::SetupUI();
+
+    DisplayLockGuard lock(this);
+    auto screen = lv_screen_active();
+
+    // 屏幕深邃极夜黑蓝底色 (#0A0E16)
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x0A0E16), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+
+    // 隐藏小智原生状态栏与顶栏，彻底消除顶部药丸和时间重叠冲突
+    if (status_bar_) {
+        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    }
+    if (top_bar_) {
+        lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    }
+
+    // 关键优化：清除基类容器滚动，设置透明并开启事件全穿透冒泡
+    if (container_) {
+        lv_obj_remove_flag(container_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(container_, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_flag(container_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        lv_obj_set_style_bg_opa(container_, LV_OPA_TRANSP, 0);
+    }
+    if (content_) {
+        lv_obj_remove_flag(content_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(content_, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_flag(content_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        lv_obj_set_style_bg_opa(content_, LV_OPA_TRANSP, 0);
+    }
+
+    // 2. 首屏定制：宽幅通透表盘（Clock & Stocks）
+    SetupHomeDashboardUI();
+
+    // 3. 创建第二屏天气全屏覆盖层容器（初始隐藏，首次滑动时懒加载，保护开机内存）
+    weather_overlay_ = lv_obj_create(screen);
+    lv_obj_set_size(weather_overlay_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_pos(weather_overlay_, 0, 0);
+    lv_obj_set_style_bg_color(weather_overlay_, lv_color_hex(0x0A0E16), 0);
+    lv_obj_set_style_bg_opa(weather_overlay_, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(weather_overlay_, 0, 0);
+    lv_obj_set_style_border_width(weather_overlay_, 0, 0);
+    lv_obj_set_style_radius(weather_overlay_, 0, 0);
+    lv_obj_set_scrollbar_mode(weather_overlay_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(weather_overlay_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_CLICKABLE);
+
+    // 4. 底部页面三圆点指示器（播放器、主表盘、天气面板）
+    indicator_container_ = lv_obj_create(screen);
+    lv_obj_set_size(indicator_container_, 120, 32);
+    lv_obj_align(indicator_container_, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_set_style_bg_opa(indicator_container_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(indicator_container_, 0, 0);
+    lv_obj_set_style_pad_all(indicator_container_, 0, 0);
+    lv_obj_set_flex_flow(indicator_container_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(indicator_container_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(indicator_container_, 10, 0);
+    lv_obj_set_scrollbar_mode(indicator_container_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(indicator_container_, LV_OBJ_FLAG_SCROLLABLE);
+
+    dot_player_ = lv_obj_create(indicator_container_);
+    lv_obj_set_size(dot_player_, 6, 5);
+    lv_obj_set_style_radius(dot_player_, 3, 0);
+    lv_obj_set_style_bg_color(dot_player_, lv_color_hex(0x31353E), 0);
+    lv_obj_set_style_border_width(dot_player_, 0, 0);
+    lv_obj_add_flag(dot_player_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(
+        dot_player_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->ShowPlayerPage();
+        },
+        LV_EVENT_CLICKED, this);
+
+    dot_home_ = lv_obj_create(indicator_container_);
+    lv_obj_set_size(dot_home_, 18, 5);
+    lv_obj_set_style_radius(dot_home_, 3, 0);
+    lv_obj_set_style_bg_color(dot_home_, lv_color_hex(0x00D2FF), 0);
+    lv_obj_set_style_border_width(dot_home_, 0, 0);
+    lv_obj_add_flag(dot_home_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(
+        dot_home_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->ShowHomePage();
+        },
+        LV_EVENT_CLICKED, this);
+
+    dot_weather_ = lv_obj_create(indicator_container_);
+    lv_obj_set_size(dot_weather_, 6, 5);
+    lv_obj_set_style_radius(dot_weather_, 3, 0);
+    lv_obj_set_style_bg_color(dot_weather_, lv_color_hex(0x31353E), 0);
+    lv_obj_set_style_border_width(dot_weather_, 0, 0);
+    lv_obj_add_flag(dot_weather_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(
+        dot_weather_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->ShowWeatherPage();
+        },
+        LV_EVENT_CLICKED, this);
+
+    // 5. 全局多向手势滑动监听器（Player <-> Home <-> Weather, 下拉 Settings）
+    auto on_gesture_cb = [](lv_event_t* e) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+        auto& app = Application::GetInstance();
+        auto state = app.GetDeviceState();
+        if (state == kDeviceStateWifiConfiguring) {
+            return;
+        }
+        lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+        if (self->current_page_ == 0) {
+            if (dir == LV_DIR_LEFT) {
+                self->ShowWeatherPage();
+            } else if (dir == LV_DIR_RIGHT) {
+                self->ShowPlayerPage();
+            } else if (dir == LV_DIR_BOTTOM) {
+                self->ShowSettingsPage();
+            }
+        } else if (self->current_page_ == 1) {
+            if (dir == LV_DIR_RIGHT) {
+                self->ShowHomePage();
+            } else if (dir == LV_DIR_BOTTOM) {
+                self->ShowSettingsPage();
+            }
+        } else if (self->current_page_ == -1) {
+            if (dir == LV_DIR_LEFT) {
+                self->ShowHomePage();
+            } else if (dir == LV_DIR_BOTTOM) {
+                self->ShowSettingsPage();
+            }
+        } else if (self->current_page_ == 2) {
+            if (dir == LV_DIR_TOP) {
+                self->ShowHomePage();
+            }
+        }
+    };
+
+    lv_obj_add_event_cb(screen, on_gesture_cb, LV_EVENT_GESTURE, this);
+    lv_obj_add_event_cb(weather_overlay_, on_gesture_cb, LV_EVENT_GESTURE, this);
+
+    lv_obj_move_foreground(indicator_container_);
+
+    // 6. 启动每秒执行的时钟、股票与播放器调度定时器
+    clock_timer_ = lv_timer_create(
+        [](lv_timer_t* timer) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
+            self->UpdateHomeClock();
+            if (self->weather_ui_created_) {
+                self->UpdateWeatherClock();
+            }
+            if (self->is_playing_ && self->player_ui_created_ && !self->playlist_.empty()) {
+                self->play_elapsed_sec_++;
+                const auto& cur_track = self->playlist_[self->current_track_idx_];
+                if (self->play_elapsed_sec_ >= cur_track.duration_sec) {
+                    self->OnPlayerNextClicked();
+                } else {
+                    self->UpdatePlayerUI();
+                }
+            }
+            self->CheckAndTriggerStockFetch();
+            self->CheckAndTriggerWeatherFetch();
+        },
+        1000, this);
+}
+
+void CustomLcdDisplay::SetTheme(Theme* theme) {
+    LcdDisplay::SetTheme(theme);
+
+    // 保持容器透明
+    if (container_) {
+        lv_obj_set_style_bg_opa(container_, LV_OPA_TRANSP, 0);
+    }
+    if (content_) {
+        lv_obj_set_style_bg_opa(content_, LV_OPA_TRANSP, 0);
+    }
+    // 确保基类状态栏隐藏不遮挡表盘
+    if (status_bar_) {
+        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (top_bar_) {
+        lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (emoji_image_) {
+        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (emoji_label_) {
+        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void CustomLcdDisplay::SetEmotion(const char* emotion) {
+    DisplayLockGuard lock(this);
+    // 表盘模式下必须严格隐藏基类的黄色表情大脸与 AI 图标，绝不允许黄色表情叠加污染表盘
+    if (emoji_image_) {
+        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (emoji_label_) {
+        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void CustomLcdDisplay::SetStatus(const char* status) {
+    DisplayLockGuard lock(this);
+    // 隐藏基类状态栏，防止顶部时间药丸和表盘重叠冲突
+    if (status_bar_) {
+        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (status_label_) {
+        lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void CustomLcdDisplay::SetupHomeDashboardUI() {
+    auto screen = lv_screen_active();
+
+    // 隐藏默认表情
+    if (emoji_label_) {
+        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (emoji_image_) {
+        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // 核心满屏看板容器：360x360，全屏布局
+    home_dashboard_ = lv_obj_create(screen);
+    lv_obj_set_size(home_dashboard_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_pos(home_dashboard_, 0, 0);
+    lv_obj_set_style_bg_opa(home_dashboard_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(home_dashboard_, 0, 0);
+    lv_obj_set_style_pad_all(home_dashboard_, 0, 0);
+    lv_obj_set_scrollbar_mode(home_dashboard_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(home_dashboard_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(home_dashboard_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // 外圈赛博发光微弧线 (Cyan Top Arc)
+    lv_obj_t* top_arc = lv_arc_create(home_dashboard_);
+    lv_obj_set_size(top_arc, 348, 348);
+    lv_obj_align(top_arc, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_angles(top_arc, 220, 320);
+    lv_arc_set_bg_angles(top_arc, 220, 320);
+    lv_obj_remove_style(top_arc, NULL, LV_PART_KNOB);
+    lv_obj_set_style_arc_width(top_arc, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(top_arc, lv_color_hex(0x00D2FF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(top_arc, LV_OPA_70, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(top_arc, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(top_arc, LV_OBJ_FLAG_CLICKABLE);
+
+    // ========================================================
+    // 上半部分：极简通透大字时间 (y: 28 ~ 130)
+    // ========================================================
+    home_hud_box_ = lv_obj_create(home_dashboard_);
+    lv_obj_set_size(home_hud_box_, 300, 100);
+    lv_obj_align(home_hud_box_, LV_ALIGN_TOP_MID, 0, 30);
+    lv_obj_set_style_bg_opa(home_hud_box_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(home_hud_box_, 0, 0);
+    lv_obj_set_style_pad_all(home_hud_box_, 0, 0);
+    lv_obj_set_flex_flow(home_hud_box_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(home_hud_box_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(home_hud_box_, 4, 0);
+    lv_obj_set_scrollbar_mode(home_hud_box_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(home_hud_box_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(home_hud_box_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(home_hud_box_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(home_hud_box_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // 大号时间行：30px 饱满无衬线纯白时间 + 浅青色秒数
+    lv_obj_t* time_row = lv_obj_create(home_hud_box_);
+    lv_obj_set_size(time_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(time_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(time_row, 0, 0);
+    lv_obj_set_style_pad_all(time_row, 0, 0);
+    lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(time_row, 6, 0);
+    lv_obj_remove_flag(time_row, LV_OBJ_FLAG_CLICKABLE);
+
+    home_time_label_ = lv_label_create(time_row);
+    lv_obj_set_style_text_font(home_time_label_, &font_maison_neue_book_26, 0);
+    lv_obj_set_style_text_color(home_time_label_, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(home_time_label_, "13:31");
+    lv_obj_remove_flag(home_time_label_, LV_OBJ_FLAG_CLICKABLE);
+
+    home_sec_label_ = lv_label_create(time_row);
+    lv_obj_set_style_text_font(home_sec_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(home_sec_label_, lv_color_hex(0x00D2FF), 0);
+    lv_obj_set_style_pad_bottom(home_sec_label_, 2, 0);
+    lv_label_set_text(home_sec_label_, "00s");
+    lv_obj_remove_flag(home_sec_label_, LV_OBJ_FLAG_CLICKABLE);
+
+    // 优雅日期行：10月2日 · 星期五 (FRI)
+    home_date_label_ = lv_label_create(home_hud_box_);
+    lv_obj_set_style_text_color(home_date_label_, lv_color_hex(0x859399), 0);
+    lv_label_set_text(home_date_label_, "10月2日 · 星期五 (FRI)");
+    lv_obj_remove_flag(home_date_label_, LV_OBJ_FLAG_CLICKABLE);
+
+    // 中间微光水平分割线（宽 260px，高 1px）
+    lv_obj_t* mid_div = lv_obj_create(home_dashboard_);
+    lv_obj_set_size(mid_div, 260, 1);
+    lv_obj_align(mid_div, LV_ALIGN_TOP_MID, 0, 134);
+    lv_obj_set_style_bg_color(mid_div, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_border_width(mid_div, 0, 0);
+    lv_obj_set_style_pad_all(mid_div, 0, 0);
+    lv_obj_remove_flag(mid_div, LV_OBJ_FLAG_CLICKABLE);
+
+    // ========================================================
+    // 下半部分：宽幅舒展股票卡片区 (支持 联想、NVDA、QQQ、AAPL、GOOGL 自动轮播)
+    // ========================================================
+    stock_card_ = lv_obj_create(home_dashboard_);
+    lv_obj_set_size(stock_card_, 300, 136);
+    lv_obj_align(stock_card_, LV_ALIGN_TOP_MID, 0, 150);
+    lv_obj_set_style_bg_opa(stock_card_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(stock_card_, 0, 0);
+    lv_obj_set_style_pad_all(stock_card_, 0, 0);
+    lv_obj_set_flex_flow(stock_card_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(stock_card_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(stock_card_, 12, 0);
+    lv_obj_set_scrollbar_mode(stock_card_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(stock_card_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(stock_card_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(stock_card_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(stock_card_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // A. 标的代码与名称：联想集团 00992.HK (居中展示)
+    lv_obj_t* title_box = lv_obj_create(stock_card_);
+    lv_obj_set_size(title_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(title_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(title_box, 0, 0);
+    lv_obj_set_style_pad_all(title_box, 0, 0);
+    lv_obj_set_flex_flow(title_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(title_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(title_box, 8, 0);
+    lv_obj_remove_flag(title_box, LV_OBJ_FLAG_CLICKABLE);
+
+    stock_name_label_ = lv_label_create(title_box);
+    lv_obj_set_style_text_color(stock_name_label_, lv_color_hex(0xDFE2EE), 0);
+    lv_label_set_text(stock_name_label_, "联想集团");
+    lv_obj_remove_flag(stock_name_label_, LV_OBJ_FLAG_CLICKABLE);
+
+    stock_code_label_ = lv_label_create(title_box);
+    lv_obj_set_style_text_font(stock_code_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(stock_code_label_, lv_color_hex(0x38BDF8), 0);
+    lv_label_set_text(stock_code_label_, "00992.HK");
+    lv_obj_remove_flag(stock_code_label_, LV_OBJ_FLAG_CLICKABLE);
+
+    // B. 大号现价与涨跌幅
+    lv_obj_t* price_row = lv_obj_create(stock_card_);
+    lv_obj_set_size(price_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(price_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(price_row, 0, 0);
+    lv_obj_set_style_pad_all(price_row, 0, 0);
+    lv_obj_set_flex_flow(price_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(price_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(price_row, 12, 0);
+    lv_obj_remove_flag(price_row, LV_OBJ_FLAG_CLICKABLE);
+
+    stock_price_label_ = lv_label_create(price_row);
+    lv_obj_set_style_text_font(stock_price_label_, &font_maison_neue_book_26, 0);
+    lv_obj_set_style_text_color(stock_price_label_, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(stock_price_label_, "HK$ 34.12");
+    lv_obj_remove_flag(stock_price_label_, LV_OBJ_FLAG_CLICKABLE);
+
+    // 涨跌幅副级字（统一 Maison Neue 14px 科技感字体，红涨绿跌）
+    stock_change_badge_ = lv_obj_create(price_row);
+    lv_obj_set_size(stock_change_badge_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(stock_change_badge_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(stock_change_badge_, 0, 0);
+    lv_obj_set_style_pad_all(stock_change_badge_, 0, 0);
+    lv_obj_remove_flag(stock_change_badge_, LV_OBJ_FLAG_CLICKABLE);
+
+    stock_change_label_ = lv_label_create(stock_change_badge_);
+    lv_obj_set_style_text_font(stock_change_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(stock_change_label_, lv_color_hex(0xEF4444), 0);
+    lv_label_set_text(stock_change_label_, "-1.22% (-0.42)");
+    lv_obj_remove_flag(stock_change_label_, LV_OBJ_FLAG_CLICKABLE);
+
+    // C. 区间直接展示（统一 Maison Neue 14px 字体）
+    stock_range_label_ = lv_label_create(stock_card_);
+    lv_obj_set_style_text_font(stock_range_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(stock_range_label_, lv_color_hex(0x859399), 0);
+    lv_label_set_text(stock_range_label_, "33.80 - 35.24");
+    lv_obj_remove_flag(stock_range_label_, LV_OBJ_FLAG_CLICKABLE);
+
+    // 初始化默认 5 支股票轮播列表（开箱即用）
+    if (stock_list_.empty()) {
+        stock_list_ = {
+            {"00992.HK", "联想集团", "LNVGY", "HK$ ", "34.32", "-0.64% (-0.22)", "(-0.22)", "33.74 - 35.24", "42.8M", false, true, true},
+            {"NVDA", "英伟达", "NVDA", "$ ", "230.86", "+1.09% (+2.48)", "(+2.48)", "228.16 - 232.29", "98.5M", true, false, true},
+            {"QQQ", "纳指100", "QQQ", "$ ", "742.03", "+0.31% (+2.26)", "(+2.26)", "736.25 - 744.67", "35.7M", true, false, true},
+            {"AAPL", "苹果", "AAPL", "$ ", "330.32", "-0.81% (-2.70)", "(-2.70)", "325.81 - 332.48", "36.3M", false, true, true},
+            {"GOOGL", "谷歌", "GOOGL", "$ ", "338.24", "-1.70% (-5.84)", "(-5.84)", "335.51 - 353.22", "33.2M", false, true, true}
+        };
+    }
+    ApplyStockUI(stock_list_[0]);
+
+    UpdateHomeClock();
+}
+
+void CustomLcdDisplay::UpdateHomeClock() {
+    auto& app = Application::GetInstance();
+    auto state = app.GetDeviceState();
+    bool in_config = (state == kDeviceStateWifiConfiguring);
+
+    // 状态切换时动态适配 UI，确保配网提示（热点名、齿轮、IP）完整可见且零干扰
+    if (in_config != in_config_mode_cached_) {
+        in_config_mode_cached_ = in_config;
+        if (in_config) {
+            // 配网模式：隐藏股票看板与播放器，显露基类表情与提示，显示基类状态栏
+            if (home_dashboard_)
+                lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
+            if (player_overlay_)
+                lv_obj_add_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
+            if (weather_overlay_)
+                lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
+            if (settings_overlay_)
+                lv_obj_add_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
+            if (emoji_label_)
+                lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+            if (status_bar_)
+                lv_obj_remove_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+            if (indicator_container_)
+                lv_obj_add_flag(indicator_container_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        } else {
+            // 退出配网/进入待机：恢复股票时间看板，隐藏基类状态栏与表情
+            if (home_dashboard_)
+                lv_obj_remove_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
+            if (emoji_label_)
+                lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+            if (status_bar_)
+                lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+            if (indicator_container_)
+                lv_obj_remove_flag(indicator_container_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (in_config || !home_time_label_)
+        return;
+
+    time_t now = time(NULL);
+    struct tm* tm_now = localtime(&now);
+
+    if (tm_now && tm_now->tm_year >= (2025 - 1900)) {
+        char time_buf[16];
+        snprintf(time_buf, sizeof(time_buf), "%02d:%02d", tm_now->tm_hour, tm_now->tm_min);
+        lv_label_set_text(home_time_label_, time_buf);
+
+        char sec_buf[16];
+        snprintf(sec_buf, sizeof(sec_buf), "%02ds", tm_now->tm_sec);
+        lv_label_set_text(home_sec_label_, sec_buf);
+
+        static const char* const weekdays_cn[] = {"星期日", "星期一", "星期二", "星期三",
+                                                  "星期四", "星期五", "星期六"};
+        static const char* const weekdays_en[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+        char date_buf[64];
+        snprintf(date_buf, sizeof(date_buf), "%d月%d日 · %s (%s)", tm_now->tm_mon + 1, tm_now->tm_mday,
+                 weekdays_cn[tm_now->tm_wday], weekdays_en[tm_now->tm_wday]);
+        lv_label_set_text(home_date_label_, date_buf);
+    }
+
+    // 股票轮播：每 4 秒轮换展示下一只股票（5 支股票 20 秒循环一轮）
+    if (!stock_list_.empty()) {
+        if (++stock_carousel_counter_ >= 4) {
+            stock_carousel_counter_ = 0;
+            current_stock_idx_ = (current_stock_idx_ + 1) % stock_list_.size();
+            ApplyStockUI(stock_list_[current_stock_idx_]);
+        }
+    }
+}
+
+void CustomLcdDisplay::CheckAndTriggerStockFetch() {
+    auto& app = Application::GetInstance();
+    auto state = app.GetDeviceState();
+
+    if (state != kDeviceStateIdle) {
+        idle_start_sec_ = 0;
+        return;
+    }
+
+    int64_t now_sec = esp_timer_get_time() / 1000000;
+    if (idle_start_sec_ == 0) {
+        idle_start_sec_ = now_sec;
+    }
+
+    // 避开开机握手敏感期
+    if (now_sec - idle_start_sec_ < 20) {
+        return;
+    }
+
+    if (stock_fetching_) {
+        return;
+    }
+
+    // 每 10 分钟自动刷新一次
+    if (last_stock_fetch_sec_ != 0 && (now_sec - last_stock_fetch_sec_) < 600) {
+        return;
+    }
+
+    last_stock_fetch_sec_ = now_sec;
+    stock_fetching_ = true;
+
+    xTaskCreate(
+        [](void* arg) {
+            auto self = static_cast<CustomLcdDisplay*>(arg);
+            self->FetchStockData();
+            self->stock_fetching_ = false;
+            vTaskDelete(NULL);
+        },
+        "stock_fetch", 4096, this, 1, nullptr);
+}
+
+void CustomLcdDisplay::FetchStockData() {
+    auto& app = Application::GetInstance();
+    auto state = app.GetDeviceState();
+    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+        return;
+    }
+
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    if (!network) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Fetching Multi-Stock data (Lenovo, NVDA, QQQ, AAPL, GOOGL)...");
+    auto http = network->CreateHttp(0);
+    if (!http) {
+        return;
+    }
+
+    bool success = false;
+    std::string body;
+    if (http->Open("GET", "http://qt.gtimg.cn/q=r_hk00992,usNVDA,usQQQ,usAAPL,usGOOGL")) {
+        auto status_code = http->GetStatusCode();
+        if (status_code && *status_code == 200) {
+            body = http->ReadAll();
+            success = true;
+        }
+        http->Close();
+    }
+
+    if (success && !body.empty()) {
+        ParseAndApplyStock(body);
+    }
+}
+
+void CustomLcdDisplay::ParseAndApplyStock(const std::string& body) {
+    auto safe_stof = [](const std::string& str, float def_val) -> float {
+        if (str.empty())
+            return def_val;
+        char* endptr = nullptr;
+        float val = strtof(str.c_str(), &endptr);
+        return (endptr == str.c_str()) ? def_val : val;
+    };
+
+    std::vector<StockData> updated_list;
+    size_t line_start = 0;
+    while (line_start < body.size()) {
+        size_t line_end = body.find(';', line_start);
+        if (line_end == std::string::npos)
+            line_end = body.size();
+        std::string line = body.substr(line_start, line_end - line_start);
+        line_start = line_end + 1;
+
+        size_t quote_pos = line.find('"');
+        if (quote_pos == std::string::npos)
+            continue;
+        std::string payload = line.substr(quote_pos + 1);
+        if (!payload.empty() && payload.back() == '"')
+            payload.pop_back();
+
+        std::vector<std::string> parts;
+        size_t start = 0;
+        while (true) {
+            size_t pos = payload.find('~', start);
+            if (pos == std::string::npos) {
+                parts.push_back(payload.substr(start));
+                break;
+            }
+            parts.push_back(payload.substr(start, pos - start));
+            start = pos + 1;
+        }
+
+        if (parts.size() >= 35) {
+            StockData data;
+            std::string raw_code = parts[2];
+
+            if (raw_code == "00992") {
+                data.code = "00992.HK";
+                data.name = "联想集团";
+                data.currency = "HK$ ";
+            } else if (raw_code.find("NVDA") != std::string::npos) {
+                data.code = "NVDA";
+                data.name = "英伟达";
+                data.currency = "$ ";
+            } else if (raw_code.find("QQQ") != std::string::npos) {
+                data.code = "QQQ";
+                data.name = "纳指100";
+                data.currency = "$ ";
+            } else if (raw_code.find("AAPL") != std::string::npos) {
+                data.code = "AAPL";
+                data.name = "苹果";
+                data.currency = "$ ";
+            } else if (raw_code.find("GOOGL") != std::string::npos) {
+                data.code = "GOOGL";
+                data.name = "谷歌";
+                data.currency = "$ ";
+            } else {
+                continue;
+            }
+
+            float p = safe_stof(parts[3], 0.0f);
+            float chg = safe_stof(parts[31], 0.0f);
+            float pct = safe_stof(parts[32], 0.0f);
+            float high = safe_stof(parts[33], 0.0f);
+            float low = safe_stof(parts[34], 0.0f);
+
+            if (p > 0.01f) {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%.2f", p);
+                data.price = buf;
+
+                if (chg >= 0.0f) {
+                    data.is_up = true;
+                    data.is_down = false;
+                    snprintf(buf, sizeof(buf), "+%.2f%% (+%.2f)", pct, chg);
+                } else {
+                    data.is_up = false;
+                    data.is_down = true;
+                    snprintf(buf, sizeof(buf), "%.2f%% (%.2f)", pct, chg);
+                }
+                data.change_pct = buf;
+
+                if (low > 0.01f && high > 0.01f) {
+                    char range_buf[64];
+                    snprintf(range_buf, sizeof(range_buf), "%.2f - %.2f", low, high);
+                    data.range = range_buf;
+                }
+                data.loaded = true;
+                updated_list.push_back(data);
+            }
+        }
+    }
+
+    if (!updated_list.empty()) {
+        Application::GetInstance().Schedule([this, updated_list]() {
+            DisplayLockGuard lock(this);
+            this->stock_list_ = updated_list;
+            if (this->current_stock_idx_ >= this->stock_list_.size()) {
+                this->current_stock_idx_ = 0;
+            }
+            this->ApplyStockUI(this->stock_list_[this->current_stock_idx_]);
+        });
+    }
+}
+
+void CustomLcdDisplay::ApplyStockUI(const StockData& data) {
+    current_stock_ = data;
+    if (!stock_price_label_ || !stock_change_label_ || !stock_name_label_ || !stock_code_label_)
+        return;
+
+    lv_label_set_text(stock_name_label_, data.name.c_str());
+    lv_label_set_text(stock_code_label_, data.code.c_str());
+
+    std::string price_text = data.currency + data.price;
+    lv_label_set_text(stock_price_label_, price_text.c_str());
+    lv_label_set_text(stock_change_label_, data.change_pct.c_str());
+    if (stock_range_label_) {
+        lv_label_set_text(stock_range_label_, data.range.c_str());
+    }
+
+    // 红涨绿跌
+    if (data.is_up) {
+        lv_obj_set_style_text_color(stock_change_label_, lv_color_hex(0xEF4444), 0);  // 亮红涨
+    } else {
+        lv_obj_set_style_text_color(stock_change_label_, lv_color_hex(0x10B981), 0);  // 翠绿跌
+    }
+}
+
+// ========================================================
+// 懒加载：第二屏 Weather Telemetry (宽幅大气天气表盘)
+// ========================================================
+void CustomLcdDisplay::EnsureWeatherUI() {
+    if (weather_ui_created_)
+        return;
+    weather_ui_created_ = true;
+
+    // 1. 顶部位置标签（单独汉字，无背景胶囊，居中，y: 16）
+    weather_loc_label_ = lv_label_create(weather_overlay_);
+    lv_label_set_text(weather_loc_label_, current_weather_.city.c_str());
+    lv_obj_set_style_text_color(weather_loc_label_, lv_color_hex(0xCBD5E1), 0);
+    lv_obj_align(weather_loc_label_, LV_ALIGN_TOP_MID, 0, 16);
+
+    // 2. 天气状况与 AQI 标签行 (y: 42, h: 20)
+    lv_obj_t* cond_box = lv_obj_create(weather_overlay_);
+    lv_obj_set_size(cond_box, 260, 20);
+    lv_obj_align(cond_box, LV_ALIGN_TOP_MID, 0, 42);
+    lv_obj_set_style_bg_opa(cond_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cond_box, 0, 0);
+    lv_obj_set_style_pad_all(cond_box, 0, 0);
+    lv_obj_set_flex_flow(cond_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(cond_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(cond_box, 10, 0);
+    lv_obj_remove_flag(cond_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    weather_cond_label_ = lv_label_create(cond_box);
+    lv_label_set_text(weather_cond_label_, current_weather_.weather.c_str());
+    lv_obj_set_style_text_color(weather_cond_label_, lv_color_hex(0x94A3B8), 0);
+
+    lv_obj_t* aqi_badge = lv_obj_create(cond_box);
+    lv_obj_set_size(aqi_badge, 76, 18);
+    lv_obj_set_style_radius(aqi_badge, 9, 0);
+    lv_obj_set_style_bg_color(aqi_badge, lv_color_hex(0x064E3B), 0);
+    lv_obj_set_style_border_width(aqi_badge, 0, 0);
+    lv_obj_set_style_pad_all(aqi_badge, 0, 0);
+    lv_obj_remove_flag(aqi_badge, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* aqi_lbl = lv_label_create(aqi_badge);
+    lv_label_set_text(aqi_lbl, current_weather_.aqi.c_str());
+    lv_obj_set_style_text_color(aqi_lbl, lv_color_hex(0x34D399), 0);
+    lv_obj_center(aqi_lbl);
+
+    // 3. 中央超大主温度与湿度整合 (y: 68, h: 44)
+    lv_obj_t* temp_box = lv_obj_create(weather_overlay_);
+    lv_obj_set_size(temp_box, 240, 44);
+    lv_obj_align(temp_box, LV_ALIGN_TOP_MID, 0, 68);
+    lv_obj_set_style_bg_opa(temp_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(temp_box, 0, 0);
+    lv_obj_set_style_pad_all(temp_box, 0, 0);
+    lv_obj_set_flex_flow(temp_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(temp_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(temp_box, 4, 0);
+    lv_obj_remove_flag(temp_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    weather_temp_label_ = lv_label_create(temp_box);
+    lv_label_set_text(weather_temp_label_, current_weather_.temp.c_str());
+    lv_obj_set_style_text_font(weather_temp_label_, &font_maison_neue_book_26, 0);
+    lv_obj_set_style_text_color(weather_temp_label_, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_t* deg_c = lv_label_create(temp_box);
+    lv_label_set_text(deg_c, "°C");
+    lv_obj_set_style_text_font(deg_c, &font_noto_sans_basic_20_4, 0);
+    lv_obj_set_style_text_color(deg_c, lv_color_hex(0x00E5FF), 0);
+    lv_obj_set_style_pad_bottom(deg_c, 4, 0);
+
+    weather_hum_label_ = lv_label_create(temp_box);
+    std::string hum_str = "湿度 " + current_weather_.humidity;
+    lv_label_set_text(weather_hum_label_, hum_str.c_str());
+    lv_obj_set_style_text_color(weather_hum_label_, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_pad_bottom(weather_hum_label_, 6, 0);
+    lv_obj_set_style_margin_left(weather_hum_label_, 10, 0);
+
+    // 4. 三联环境遥测卡片 (y: 122, h: 66，已移除风向、紫外线、气压汉字)
+    lv_obj_t* trio_box = lv_obj_create(weather_overlay_);
+    lv_obj_set_size(trio_box, 286, 66);
+    lv_obj_align(trio_box, LV_ALIGN_TOP_MID, 0, 122);
+    lv_obj_set_style_bg_color(trio_box, lv_color_hex(0x111827), 0);
+    lv_obj_set_style_border_color(trio_box, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_border_width(trio_box, 1, 0);
+    lv_obj_set_style_radius(trio_box, 10, 0);
+    lv_obj_set_style_pad_all(trio_box, 4, 0);
+    lv_obj_set_flex_flow(trio_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(trio_box, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(trio_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 指标1：2级 + 速度 (移除汉字“风向”)
+    lv_obj_t* item1 = lv_obj_create(trio_box);
+    lv_obj_set_size(item1, 88, 56);
+    lv_obj_set_style_bg_color(item1, lv_color_hex(0x161F2E), 0);
+    lv_obj_set_style_border_width(item1, 0, 0);
+    lv_obj_set_style_radius(item1, 6, 0);
+    lv_obj_set_style_pad_all(item1, 4, 0);
+    lv_obj_set_flex_flow(item1, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(item1, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(item1, LV_OBJ_FLAG_SCROLLABLE);
+
+    weather_wind_val_ = lv_label_create(item1);
+    lv_label_set_text(weather_wind_val_, "2级");
+    lv_obj_set_style_text_font(weather_wind_val_, &font_noto_sans_basic_20_4, 0);
+    lv_obj_set_style_text_color(weather_wind_val_, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_t* i1_s = lv_label_create(item1);
+    lv_label_set_text(i1_s, current_weather_.wind_speed.c_str());
+    lv_obj_set_style_text_font(i1_s, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(i1_s, lv_color_hex(0x38BDF8), 0);
+
+    // 指标2：弱 + UV值 (移除汉字“紫外线”)
+    lv_obj_t* item2 = lv_obj_create(trio_box);
+    lv_obj_set_size(item2, 88, 56);
+    lv_obj_set_style_bg_color(item2, lv_color_hex(0x161F2E), 0);
+    lv_obj_set_style_border_width(item2, 0, 0);
+    lv_obj_set_style_radius(item2, 6, 0);
+    lv_obj_set_style_pad_all(item2, 4, 0);
+    lv_obj_set_flex_flow(item2, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(item2, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(item2, LV_OBJ_FLAG_SCROLLABLE);
+
+    weather_uv_val_ = lv_label_create(item2);
+    lv_label_set_text(weather_uv_val_, current_weather_.uv_level.c_str());
+    lv_obj_set_style_text_color(weather_uv_val_, lv_color_hex(0xFBBF24), 0);
+
+    lv_obj_t* i2_s = lv_label_create(item2);
+    lv_label_set_text(i2_s, current_weather_.uv_val.c_str());
+    lv_obj_set_style_text_font(i2_s, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(i2_s, lv_color_hex(0xFDE68A), 0);
+
+    // 指标3：气压值 + hPa (移除汉字“气压”)
+    lv_obj_t* item3 = lv_obj_create(trio_box);
+    lv_obj_set_size(item3, 88, 56);
+    lv_obj_set_style_bg_color(item3, lv_color_hex(0x161F2E), 0);
+    lv_obj_set_style_border_width(item3, 0, 0);
+    lv_obj_set_style_radius(item3, 6, 0);
+    lv_obj_set_style_pad_all(item3, 4, 0);
+    lv_obj_set_flex_flow(item3, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(item3, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(item3, LV_OBJ_FLAG_SCROLLABLE);
+
+    weather_pres_val_ = lv_label_create(item3);
+    lv_label_set_text(weather_pres_val_, current_weather_.pressure.c_str());
+    lv_obj_set_style_text_font(weather_pres_val_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(weather_pres_val_, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_t* i3_s = lv_label_create(item3);
+    lv_label_set_text(i3_s, "hPa");
+    lv_obj_set_style_text_font(i3_s, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(i3_s, lv_color_hex(0x94A3B8), 0);
+
+    // 6. 底部 3 时段预报条 (y: 202, h: 92，卡片增高至 88px，时间完整暴露无遮挡！)
+    lv_obj_t* fore_box = lv_obj_create(weather_overlay_);
+    lv_obj_set_size(fore_box, 290, 92);
+    lv_obj_align(fore_box, LV_ALIGN_TOP_MID, 0, 202);
+    lv_obj_set_style_bg_opa(fore_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(fore_box, 0, 0);
+    lv_obj_set_style_pad_all(fore_box, 0, 0);
+    lv_obj_set_flex_flow(fore_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(fore_box, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(fore_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 时段 1 (w: 90, h: 88，充足高度，时间标签绝无遮挡)
+    lv_obj_t* f1 = lv_obj_create(fore_box);
+    lv_obj_set_size(f1, 90, 88);
+    lv_obj_set_style_bg_color(f1, lv_color_hex(0x131A26), 0);
+    lv_obj_set_style_border_color(f1, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_width(f1, 1, 0);
+    lv_obj_set_style_radius(f1, 8, 0);
+    lv_obj_set_style_pad_top(f1, 6, 0);
+    lv_obj_set_style_pad_top(f1, 8, 0);
+    lv_obj_set_style_pad_bottom(f1, 8, 0);
+    lv_obj_set_style_pad_left(f1, 4, 0);
+    lv_obj_set_style_pad_right(f1, 4, 0);
+    lv_obj_set_flex_flow(f1, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(f1, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(f1, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* f1_time = lv_label_create(f1);
+    lv_label_set_text(f1_time, "15:00");
+    lv_obj_set_style_text_font(f1_time, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(f1_time, lv_color_hex(0x94A3B8), 0);
+
+    // 晴天：Icon 与 温度并排在同一行
+    lv_obj_t* f1_row = lv_obj_create(f1);
+    lv_obj_set_size(f1_row, 82, 34);
+    lv_obj_set_style_bg_opa(f1_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(f1_row, 0, 0);
+    lv_obj_set_style_pad_all(f1_row, 0, 0);
+    lv_obj_set_flex_flow(f1_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(f1_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(f1_row, 5, 0);
+    lv_obj_remove_flag(f1_row, LV_OBJ_FLAG_CLICKABLE);
+
+    // 晴天太阳 Icon
+    lv_obj_t* f1_sun = lv_obj_create(f1_row);
+    lv_obj_set_size(f1_sun, 12, 12);
+    lv_obj_set_style_radius(f1_sun, 6, 0);
+    lv_obj_set_style_bg_color(f1_sun, lv_color_hex(0xFBBF24), 0);
+    lv_obj_set_style_border_color(f1_sun, lv_color_hex(0xF59E0B), 0);
+    lv_obj_set_style_border_width(f1_sun, 2, 0);
+    lv_obj_set_style_pad_all(f1_sun, 0, 0);
+    lv_obj_remove_flag(f1_sun, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t* f1_temp = lv_label_create(f1_row);
+    lv_label_set_text(f1_temp, "25");
+    lv_obj_set_style_text_font(f1_temp, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(f1_temp, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_t* f1_deg = lv_label_create(f1_row);
+    lv_label_set_text(f1_deg, "°");
+    lv_obj_set_style_text_font(f1_deg, &font_noto_sans_basic_20_4, 0);
+    lv_obj_set_style_text_color(f1_deg, lv_color_hex(0x94A3B8), 0);
+
+    // 时段 2 (多云，w: 90, h: 88)
+    lv_obj_t* f2 = lv_obj_create(fore_box);
+    lv_obj_set_size(f2, 90, 88);
+    lv_obj_set_style_bg_color(f2, lv_color_hex(0x182234), 0);
+    lv_obj_set_style_border_color(f2, lv_color_hex(0x0284C7), 0);
+    lv_obj_set_style_border_width(f2, 1, 0);
+    lv_obj_set_style_radius(f2, 8, 0);
+    lv_obj_set_style_pad_top(f2, 8, 0);
+    lv_obj_set_style_pad_bottom(f2, 8, 0);
+    lv_obj_set_style_pad_left(f2, 4, 0);
+    lv_obj_set_style_pad_right(f2, 4, 0);
+    lv_obj_set_flex_flow(f2, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(f2, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(f2, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* f2_time = lv_label_create(f2);
+    lv_label_set_text(f2_time, "18:00");
+    lv_obj_set_style_text_font(f2_time, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(f2_time, lv_color_hex(0x38BDF8), 0);
+
+    // 多云：Icon 与 温度并排在同一行
+    lv_obj_t* f2_row = lv_obj_create(f2);
+    lv_obj_set_size(f2_row, 82, 34);
+    lv_obj_set_style_bg_opa(f2_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(f2_row, 0, 0);
+    lv_obj_set_style_pad_all(f2_row, 0, 0);
+    lv_obj_set_flex_flow(f2_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(f2_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(f2_row, 5, 0);
+    lv_obj_remove_flag(f2_row, LV_OBJ_FLAG_CLICKABLE);
+
+    // 多云云朵 Icon
+    lv_obj_t* f2_cloud = lv_obj_create(f2_row);
+    lv_obj_set_size(f2_cloud, 16, 10);
+    lv_obj_set_style_radius(f2_cloud, 5, 0);
+    lv_obj_set_style_bg_color(f2_cloud, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_border_width(f2_cloud, 0, 0);
+    lv_obj_set_style_pad_all(f2_cloud, 0, 0);
+    lv_obj_remove_flag(f2_cloud, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t* f2_temp = lv_label_create(f2_row);
+    lv_label_set_text(f2_temp, "22");
+    lv_obj_set_style_text_font(f2_temp, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(f2_temp, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_t* f2_deg = lv_label_create(f2_row);
+    lv_label_set_text(f2_deg, "°");
+    lv_obj_set_style_text_font(f2_deg, &font_noto_sans_basic_20_4, 0);
+    lv_obj_set_style_text_color(f2_deg, lv_color_hex(0x94A3B8), 0);
+
+    // 时段 3 (雨天/夜间，w: 90, h: 88)
+    lv_obj_t* f3 = lv_obj_create(fore_box);
+    lv_obj_set_size(f3, 90, 88);
+    lv_obj_set_style_bg_color(f3, lv_color_hex(0x131A26), 0);
+    lv_obj_set_style_border_color(f3, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_width(f3, 1, 0);
+    lv_obj_set_style_radius(f3, 8, 0);
+    lv_obj_set_style_pad_top(f3, 8, 0);
+    lv_obj_set_style_pad_bottom(f3, 8, 0);
+    lv_obj_set_style_pad_left(f3, 4, 0);
+    lv_obj_set_style_pad_right(f3, 4, 0);
+    lv_obj_set_flex_flow(f3, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(f3, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(f3, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* f3_time = lv_label_create(f3);
+    lv_label_set_text(f3_time, "21:00");
+    lv_obj_set_style_text_font(f3_time, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(f3_time, lv_color_hex(0x94A3B8), 0);
+
+    // 雨天/夜间：Icon 与 温度并排在同一行
+    lv_obj_t* f3_row = lv_obj_create(f3);
+    lv_obj_set_size(f3_row, 82, 34);
+    lv_obj_set_style_bg_opa(f3_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(f3_row, 0, 0);
+    lv_obj_set_style_pad_all(f3_row, 0, 0);
+    lv_obj_set_flex_flow(f3_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(f3_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(f3_row, 5, 0);
+    lv_obj_remove_flag(f3_row, LV_OBJ_FLAG_CLICKABLE);
+
+    // 蓝滴雨水 Icon (LV_SYMBOL_TINT)
+    lv_obj_t* f3_rain = lv_label_create(f3_row);
+    lv_label_set_text(f3_rain, LV_SYMBOL_TINT);
+    lv_obj_set_style_text_color(f3_rain, lv_color_hex(0x60A5FA), 0);
+
+    lv_obj_t* f3_temp = lv_label_create(f3_row);
+    lv_label_set_text(f3_temp, "19");
+    lv_obj_set_style_text_font(f3_temp, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(f3_temp, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_t* f3_deg = lv_label_create(f3_row);
+    lv_label_set_text(f3_deg, "°");
+    lv_obj_set_style_text_font(f3_deg, &font_noto_sans_basic_20_4, 0);
+    lv_obj_set_style_text_color(f3_deg, lv_color_hex(0x94A3B8), 0);
+
+    fore_cards_[0] = f1;
+    fore_times_[0] = f1_time;
+    fore_temps_[0] = f1_temp;
+
+    fore_cards_[1] = f2;
+    fore_times_[1] = f2_time;
+    fore_temps_[1] = f2_temp;
+
+    fore_cards_[2] = f3;
+    fore_times_[2] = f3_time;
+    fore_temps_[2] = f3_temp;
+
+    UpdateWeatherLabels();
+    UpdateWeatherHourlyForecast();
+}
+
+void CustomLcdDisplay::UpdateWeatherHourlyForecast() {
+    if (!weather_ui_created_ || !fore_cards_[0] || !fore_cards_[1] || !fore_cards_[2])
+        return;
+
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    int cur_h = timeinfo.tm_hour;
+    if (timeinfo.tm_year < 120) {
+        cur_h = 12;
+    }
+
+    int hours[3] = {
+        cur_h,
+        (cur_h + 3) % 24,
+        (cur_h + 6) % 24
+    };
+
+    // 第 0 个时段（当前时间）为高亮选中态，其余为暗色常规态
+    for (int i = 0; i < 3; ++i) {
+        char time_buf[16];
+        snprintf(time_buf, sizeof(time_buf), "%02d:00", hours[i]);
+        if (fore_times_[i]) {
+            lv_label_set_text(fore_times_[i], time_buf);
+        }
+
+        if (i == 0) {
+            // 当前时段高亮选中态（科技蓝光高亮边框 + 微微发蓝背景）
+            lv_obj_set_style_bg_color(fore_cards_[i], lv_color_hex(0x182234), 0);
+            lv_obj_set_style_border_color(fore_cards_[i], lv_color_hex(0x0284C7), 0);
+            lv_obj_set_style_border_width(fore_cards_[i], 1, 0);
+            if (fore_times_[i]) {
+                lv_obj_set_style_text_color(fore_times_[i], lv_color_hex(0x38BDF8), 0);
+            }
+        } else {
+            // 未选中常规暗色态
+            lv_obj_set_style_bg_color(fore_cards_[i], lv_color_hex(0x131A26), 0);
+            lv_obj_set_style_border_color(fore_cards_[i], lv_color_hex(0x1E293B), 0);
+            lv_obj_set_style_border_width(fore_cards_[i], 1, 0);
+            if (fore_times_[i]) {
+                lv_obj_set_style_text_color(fore_times_[i], lv_color_hex(0x94A3B8), 0);
+            }
+        }
+    }
+
+    // 根据当前主温度动态填充时段温度
+    int base_temp = 25;
+    if (!current_weather_.temp.empty()) {
+        int parsed = atoi(current_weather_.temp.c_str());
+        if (parsed > -50 && parsed < 60) {
+            base_temp = parsed;
+        }
+    }
+    if (fore_temps_[0]) {
+        lv_label_set_text_fmt(fore_temps_[0], "%d", base_temp);
+    }
+    if (fore_temps_[1]) {
+        int diff1 = (hours[1] >= 11 && hours[1] <= 15) ? 1 : -1;
+        lv_label_set_text_fmt(fore_temps_[1], "%d", base_temp + diff1);
+    }
+    if (fore_temps_[2]) {
+        int diff2 = (hours[2] >= 11 && hours[2] <= 15) ? 1 : -2;
+        lv_label_set_text_fmt(fore_temps_[2], "%d", base_temp + diff2);
+    }
+}
+
+void CustomLcdDisplay::UpdateWeatherLabels() {
+    if (!weather_ui_created_)
+        return;
+
+    if (weather_temp_label_) {
+        lv_label_set_text(weather_temp_label_, current_weather_.temp.c_str());
+    }
+    if (weather_hum_label_) {
+        std::string hum_str = "湿度 " + current_weather_.humidity;
+        lv_label_set_text(weather_hum_label_, hum_str.c_str());
+    }
+    if (weather_loc_label_) {
+        lv_label_set_text(weather_loc_label_, current_weather_.city.c_str());
+    }
+    if (weather_cond_label_) {
+        lv_label_set_text(weather_cond_label_, current_weather_.weather.c_str());
+    }
+    if (weather_wind_val_) {
+        lv_label_set_text(weather_wind_val_, current_weather_.wind_level.c_str());
+    }
+    UpdateWeatherHourlyForecast();
+}
+
+void CustomLcdDisplay::UpdateWeatherClock() {
+    UpdateWeatherHourlyForecast();
+}
+
+void CustomLcdDisplay::UpdateIndicator(int active_page) {
+    if (!dot_player_ || !dot_home_ || !dot_weather_)
+        return;
+
+    // 全部重置为 6px 暗灰色微圆点
+    lv_obj_set_size(dot_player_, 6, 5);
+    lv_obj_set_style_bg_color(dot_player_, lv_color_hex(0x31353E), 0);
+    lv_obj_set_size(dot_home_, 6, 5);
+    lv_obj_set_style_bg_color(dot_home_, lv_color_hex(0x31353E), 0);
+    lv_obj_set_size(dot_weather_, 6, 5);
+    lv_obj_set_style_bg_color(dot_weather_, lv_color_hex(0x31353E), 0);
+
+    // 激活对应页面为 18px 亮青色胶囊
+    if (active_page == -1) {
+        lv_obj_set_size(dot_player_, 18, 5);
+        lv_obj_set_style_bg_color(dot_player_, lv_color_hex(0x00D2FF), 0);
+    } else if (active_page == 1) {
+        lv_obj_set_size(dot_weather_, 18, 5);
+        lv_obj_set_style_bg_color(dot_weather_, lv_color_hex(0x00D2FF), 0);
+    } else {
+        lv_obj_set_size(dot_home_, 18, 5);
+        lv_obj_set_style_bg_color(dot_home_, lv_color_hex(0x00D2FF), 0);
+    }
+}
+
+void CustomLcdDisplay::UpdateTomorrowWeather(const TomorrowWeather& weather) {
+    DisplayLockGuard lock(this);
+    current_weather_ = weather;
+    UpdateWeatherLabels();
+}
+
+void CustomLcdDisplay::ShowPlayerPage() {
+    DisplayLockGuard lock(this);
+    EnsurePlayerUI();
+
+    current_page_ = -1;
+    if (weather_overlay_) {
+        lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (home_dashboard_) {
+        lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (settings_overlay_) {
+        lv_obj_add_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (player_overlay_) {
+        lv_obj_remove_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(player_overlay_);
+    }
+    if (indicator_container_) {
+        lv_obj_remove_flag(indicator_container_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(indicator_container_);
+    }
+    UpdateIndicator(-1);
+    SetPlayerAnimationActive(is_playing_);
+}
+
+void CustomLcdDisplay::ShowWeatherPage() {
+    DisplayLockGuard lock(this);
+    EnsureWeatherUI();
+    SetPlayerAnimationActive(false);
+
+    current_page_ = 1;
+    if (player_overlay_) {
+        lv_obj_add_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (home_dashboard_) {
+        lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (settings_overlay_) {
+        lv_obj_add_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (weather_overlay_) {
+        lv_obj_remove_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(weather_overlay_);
+    }
+    if (indicator_container_) {
+        lv_obj_remove_flag(indicator_container_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(indicator_container_);
+    }
+    UpdateIndicator(1);
+}
+
+void CustomLcdDisplay::ShowHomePage() {
+    DisplayLockGuard lock(this);
+    SetPlayerAnimationActive(false);
+    current_page_ = 0;
+    if (player_overlay_) {
+        lv_obj_add_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (weather_overlay_) {
+        lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (settings_overlay_) {
+        lv_obj_add_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (home_dashboard_) {
+        lv_obj_remove_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(home_dashboard_);
+    }
+    if (indicator_container_) {
+        lv_obj_remove_flag(indicator_container_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(indicator_container_);
+    }
+    UpdateIndicator(0);
+}
+
+void CustomLcdDisplay::ShowSettingsPage() {
+    DisplayLockGuard lock(this);
+    EnsureSettingsUI();
+    UpdateSettingsValues();
+    SetPlayerAnimationActive(false);
+
+    current_page_ = 2;
+    if (weather_overlay_) {
+        lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (player_overlay_) {
+        lv_obj_add_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (home_dashboard_) {
+        lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (indicator_container_) {
+        lv_obj_add_flag(indicator_container_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (settings_overlay_) {
+        lv_obj_remove_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(settings_overlay_);
+    }
+}
+
+// ========================================================
+// 懒加载：第三屏 Cyber HUD 音乐播放器 (Music Player)
+// ========================================================
+void CustomLcdDisplay::EnsurePlayerUI() {
+    if (player_ui_created_)
+        return;
+    player_ui_created_ = true;
+
+    if (playlist_.empty()) {
+        playlist_ = {
+            {"18cbea8743060d9c8ddfc7008418022b", "威廉古堡", "Jay Chou · 范特西", "NAVIDROME", 236},
+            {"29b6607b952b7d5f9470483d68dafc43", "白鴿", "伍佰 & China Blue", "NAVIDROME", 367},
+            {"5ec0b2083250b4f2c9abdb73df9dbbd2", "Lady", "Brett Young", "NAVIDROME", 193},
+            {"235425d0f88619d3e45822f500f23239", "I Gotta Feeling", "The Black Eyed Peas", "NAVIDROME", 288},
+            {"232668d7e7a1c4705aab26d0bb06456c", "Fire Nation", "Two Steps From Hell", "NAVIDROME", 181}
+        };
+        FetchNavidromePlaylist();
+    }
+
+    lv_obj_t* screen = lv_display_get_screen_active(lv_display_get_default());
+
+    // 1. 全屏覆盖层 (黑底圆角)
+    player_overlay_ = lv_obj_create(screen);
+    lv_obj_set_size(player_overlay_, 360, 360);
+    lv_obj_align(player_overlay_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(player_overlay_, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_border_width(player_overlay_, 0, 0);
+    lv_obj_set_style_pad_all(player_overlay_, 0, 0);
+    lv_obj_set_style_radius(player_overlay_, 180, 0);
+    lv_obj_remove_flag(player_overlay_, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 绑定向左滑动手势返回主屏
+    auto on_player_gesture = [](lv_event_t* e) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+        lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+        if (dir == LV_DIR_LEFT) {
+            self->ShowHomePage();
+        }
+    };
+    lv_obj_add_event_cb(player_overlay_, on_player_gesture, LV_EVENT_GESTURE, this);
+
+    // 2. 顶部微光标题 (y: 20)
+    player_header_label_ = lv_label_create(player_overlay_);
+    lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0x38BDF8), 0);
+    lv_obj_align(player_header_label_, LV_ALIGN_TOP_MID, 0, 20);
+
+    // 3. 中间黑胶唱片与环形进度条区 (y: 44, w: 172, h: 172)
+    lv_obj_t* disc_box = lv_obj_create(player_overlay_);
+    lv_obj_set_size(disc_box, 172, 172);
+    lv_obj_align(disc_box, LV_ALIGN_TOP_MID, 0, 44);
+    lv_obj_set_style_bg_opa(disc_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(disc_box, 0, 0);
+    lv_obj_set_style_pad_all(disc_box, 0, 0);
+    lv_obj_remove_flag(disc_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(disc_box, LV_OBJ_FLAG_CLICKABLE);
+
+    // 弧形进度条 (围绕唱片)
+    player_arc_ = lv_arc_create(disc_box);
+    lv_obj_set_size(player_arc_, 168, 168);
+    lv_obj_align(player_arc_, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_rotation(player_arc_, 135);
+    lv_arc_set_bg_angles(player_arc_, 0, 270);
+    lv_arc_set_range(player_arc_, 0, 100);
+    lv_arc_set_value(player_arc_, 0);
+    lv_obj_set_style_arc_width(player_arc_, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(player_arc_, lv_color_hex(0x1F2937), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(player_arc_, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(player_arc_, lv_color_hex(0x00E5FF), LV_PART_INDICATOR);
+    lv_obj_set_style_opa(player_arc_, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_remove_flag(player_arc_, LV_OBJ_FLAG_CLICKABLE);
+
+    // 黑胶唱片本体 (直径 134px，深邃黑胶质感，边缘高光)
+    lv_obj_t* vinyl = lv_obj_create(disc_box);
+    lv_obj_set_size(vinyl, 134, 134);
+    lv_obj_align(vinyl, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_radius(vinyl, 67, 0);
+    lv_obj_set_style_bg_color(vinyl, lv_color_hex(0x0B0F19), 0);
+    lv_obj_set_style_border_color(vinyl, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_width(vinyl, 2, 0);
+    lv_obj_set_style_pad_all(vinyl, 0, 0);
+    lv_obj_remove_flag(vinyl, LV_OBJ_FLAG_CLICKABLE);
+
+    // 移掉原先正中央的圆环限制，直接在唱片核心舒展大尺寸宽幅律动声谱
+    // 宽 116px, 高 58px，13 根律动跳柱
+    lv_obj_t* spectrum_box = lv_obj_create(vinyl);
+    lv_obj_set_size(spectrum_box, 116, 58);
+    lv_obj_align(spectrum_box, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_opa(spectrum_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(spectrum_box, 0, 0);
+    lv_obj_set_style_pad_all(spectrum_box, 0, 0);
+    lv_obj_set_flex_flow(spectrum_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(spectrum_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(spectrum_box, 3, 0);
+    lv_obj_remove_flag(spectrum_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(spectrum_box, LV_OBJ_FLAG_CLICKABLE);
+
+    // 13 柱全景音律渐变色彩体系（从青蓝两翼过渡到极光高光中央）
+    static const uint32_t kEqColors[kEqBarCount] = {
+        0x0284C7, 0x0EA5E9, 0x38BDF8, 0x00E5FF, 0x2DD4BF, 0x34D399, 0x6EE7B7,
+        0x34D399, 0x2DD4BF, 0x00E5FF, 0x38BDF8, 0x0EA5E9, 0x0284C7
+    };
+    for (size_t i = 0; i < kEqBarCount; ++i) {
+        eq_bars_[i] = lv_obj_create(spectrum_box);
+        lv_obj_set_size(eq_bars_[i], 5, 4);
+        lv_obj_set_style_radius(eq_bars_[i], 2, 0);
+        lv_obj_set_style_bg_color(eq_bars_[i], lv_color_hex(kEqColors[i]), 0);
+        lv_obj_set_style_border_width(eq_bars_[i], 0, 0);
+        lv_obj_set_style_pad_all(eq_bars_[i], 0, 0);
+        lv_obj_remove_flag(eq_bars_[i], LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    // 4. 曲目名称与艺术家 (继承系统全量中文字库，避免被精简字体截断字模)
+    player_title_label_ = lv_label_create(player_overlay_);
+    lv_obj_set_style_text_color(player_title_label_, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_width(player_title_label_, 280);
+    lv_obj_set_style_text_align(player_title_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(player_title_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_align(player_title_label_, LV_ALIGN_TOP_MID, 0, 222);
+
+    player_artist_label_ = lv_label_create(player_overlay_);
+    lv_obj_set_style_text_color(player_artist_label_, lv_color_hex(0x94A3B8), 0);
+    lv_obj_set_width(player_artist_label_, 260);
+    lv_obj_set_style_text_align(player_artist_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(player_artist_label_, LV_LABEL_LONG_DOT);
+    lv_obj_align(player_artist_label_, LV_ALIGN_TOP_MID, 0, 250);
+
+    // 5. 底部触控控制栏 (y: 280, 居中排列: Prev, Play, Next)
+    lv_obj_t* ctrl_row = lv_obj_create(player_overlay_);
+    lv_obj_set_size(ctrl_row, 240, 56);
+    lv_obj_align(ctrl_row, LV_ALIGN_TOP_MID, 0, 280);
+    lv_obj_set_style_bg_opa(ctrl_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ctrl_row, 0, 0);
+    lv_obj_set_style_pad_all(ctrl_row, 0, 0);
+    lv_obj_set_flex_flow(ctrl_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ctrl_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(ctrl_row, 22, 0);
+    lv_obj_remove_flag(ctrl_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 上一曲按钮 (44x44，深科技蓝底色，亮青边框，高辨识度)
+    player_prev_btn_ = lv_btn_create(ctrl_row);
+    lv_obj_set_size(player_prev_btn_, 44, 44);
+    lv_obj_set_style_radius(player_prev_btn_, 22, 0);
+    lv_obj_set_style_bg_color(player_prev_btn_, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_color(player_prev_btn_, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_border_width(player_prev_btn_, 2, 0);
+    lv_obj_set_style_pad_all(player_prev_btn_, 0, 0);
+    lv_obj_t* prev_icon = lv_label_create(player_prev_btn_);
+    lv_obj_set_style_text_font(prev_icon, &font_material_symbols_16_4, 0);
+    lv_label_set_text(prev_icon, MATERIAL_SYMBOLS_SKIP_PREVIOUS);
+    lv_obj_set_style_text_color(prev_icon, lv_color_hex(0xF1F5F9), 0);
+    lv_obj_align(prev_icon, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_event_cb(
+        player_prev_btn_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->OnPlayerPrevClicked();
+        },
+        LV_EVENT_CLICKED, this);
+
+    // 播放/暂停按钮 (52x52 大号核心按键，使用实心高质感矢量抗锯齿图标)
+    player_play_btn_ = lv_btn_create(ctrl_row);
+    lv_obj_set_size(player_play_btn_, 52, 52);
+    lv_obj_set_style_radius(player_play_btn_, 26, 0);
+    lv_obj_set_style_bg_color(player_play_btn_, lv_color_hex(0x0F172A), 0);
+    lv_obj_set_style_border_color(player_play_btn_, lv_color_hex(0x00E5FF), 0);
+    lv_obj_set_style_border_width(player_play_btn_, 2, 0);
+    lv_obj_set_style_pad_all(player_play_btn_, 0, 0);
+    player_play_icon_ = lv_image_create(player_play_btn_);
+    lv_image_set_src(player_play_icon_, &img_player_play_arrow);
+    lv_obj_align(player_play_icon_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_event_cb(
+        player_play_btn_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->OnPlayerPlayPauseClicked();
+        },
+        LV_EVENT_CLICKED, this);
+
+    // 下一曲按钮 (44x44，深科技蓝底色，亮青边框，高辨识度)
+    player_next_btn_ = lv_btn_create(ctrl_row);
+    lv_obj_set_size(player_next_btn_, 44, 44);
+    lv_obj_set_style_radius(player_next_btn_, 22, 0);
+    lv_obj_set_style_bg_color(player_next_btn_, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_color(player_next_btn_, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_border_width(player_next_btn_, 2, 0);
+    lv_obj_set_style_pad_all(player_next_btn_, 0, 0);
+    lv_obj_t* next_icon = lv_label_create(player_next_btn_);
+    lv_obj_set_style_text_font(next_icon, &font_material_symbols_16_4, 0);
+    lv_label_set_text(next_icon, MATERIAL_SYMBOLS_SKIP_NEXT);
+    lv_obj_set_style_text_color(next_icon, lv_color_hex(0xF1F5F9), 0);
+    lv_obj_align(next_icon, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_event_cb(
+        player_next_btn_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->OnPlayerNextClicked();
+        },
+        LV_EVENT_CLICKED, this);
+
+    // 7. 动画驱动定时器 (90ms 节拍，默认休眠，仅播放且在当前页时唤醒)
+    if (!player_anim_timer_) {
+        player_anim_timer_ = lv_timer_create(
+            [](lv_timer_t* t) {
+                auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(t));
+                self->UpdatePlayerAnimation();
+            },
+            90, this);
+        lv_timer_pause(player_anim_timer_);
+    }
+
+    UpdatePlayerUI();
+}
+
+void CustomLcdDisplay::UpdatePlayerUI() {
+    if (!player_ui_created_ || playlist_.empty())
+        return;
+
+    const auto& track = playlist_[current_track_idx_];
+
+    char hdr_buf[48];
+    snprintf(hdr_buf, sizeof(hdr_buf), "♪ 0%d/0%d · %s", (int)(current_track_idx_ + 1),
+             (int)playlist_.size(), track.source.c_str());
+    if (player_header_label_) {
+        lv_label_set_text(player_header_label_, hdr_buf);
+    }
+
+    if (player_title_label_) {
+        lv_label_set_text(player_title_label_, track.title.c_str());
+    }
+
+    if (player_artist_label_) {
+        lv_label_set_text(player_artist_label_, track.artist.c_str());
+    }
+
+    // 播放/暂停按钮视觉状态更新 (实心抗锯齿图标切换)
+    if (player_play_btn_ && player_play_icon_) {
+        lv_obj_set_style_bg_color(player_play_btn_, lv_color_hex(0x0F172A), 0);
+        lv_obj_set_style_border_color(player_play_btn_, lv_color_hex(0x00E5FF), 0);
+        lv_obj_set_style_border_width(player_play_btn_, 2, 0);
+        if (is_playing_) {
+            lv_image_set_src(player_play_icon_, &img_player_pause);
+        } else {
+            lv_image_set_src(player_play_icon_, &img_player_play_arrow);
+        }
+    }
+
+    if (player_arc_) {
+        int pct = 0;
+        if (track.duration_sec > 0) {
+            pct = (play_elapsed_sec_ * 100) / track.duration_sec;
+            if (pct > 100)
+                pct = 100;
+        }
+        lv_arc_set_value(player_arc_, pct);
+    }
+
+    SetPlayerAnimationActive(is_playing_);
+}
+
+void CustomLcdDisplay::SetPlayerAnimationActive(bool active) {
+    if (!player_anim_timer_)
+        return;
+    if (active && is_playing_ && current_page_ == -1) {
+        lv_timer_resume(player_anim_timer_);
+    } else {
+        lv_timer_pause(player_anim_timer_);
+        for (size_t i = 0; i < kEqBarCount; ++i) {
+            if (eq_bars_[i]) {
+                lv_obj_set_height(eq_bars_[i], 4);
+            }
+        }
+    }
+}
+
+void CustomLcdDisplay::UpdatePlayerAnimation() {
+    if (!player_ui_created_ || current_page_ != -1)
+        return;
+
+    if (!is_playing_) {
+        for (size_t i = 0; i < kEqBarCount; ++i) {
+            if (eq_bars_[i]) {
+                lv_obj_set_height(eq_bars_[i], 4);
+            }
+        }
+        return;
+    }
+
+    anim_step_++;
+
+    // 13 根声波柱的大开大合声学跳动包络（中央最高 44px，两翼自然收束）
+    static const int kBaseMaxH[kEqBarCount] = {
+        10, 16, 22, 28, 34, 40, 44, 40, 34, 28, 22, 16, 10
+    };
+    for (size_t i = 0; i < kEqBarCount; ++i) {
+        if (!eq_bars_[i])
+            continue;
+        float phase = (anim_step_ * 0.38f) + (float)i * 0.55f;
+        float wave1 = sinf(phase);
+        float wave2 = sinf(phase * 1.7f);
+        int wave = (int)(9.0f * wave1 + 4.0f * wave2);
+        int noise = ((anim_step_ * 11 + i * 17) % 7) - 3;
+        int h = kBaseMaxH[i] + wave + noise;
+        if (h < 4)
+            h = 4;
+        if (h > 46)
+            h = 46;
+        lv_obj_set_height(eq_bars_[i], h);
+    }
+}
+
+void CustomLcdDisplay::StopNavidromeStream() {
+    stream_stop_requested_ = true;
+    current_playback_id_++;
+    SetPlayerAnimationActive(false);
+    Application::GetInstance().GetAudioService().ResetDecoder();
+}
+
+void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
+    StopNavidromeStream();
+
+    if (playlist_.empty() || track_idx >= playlist_.size())
+        return;
+
+    const auto& track = playlist_[track_idx];
+    if (track.id.empty()) {
+        ESP_LOGW(TAG, "Track id is empty, cannot stream from Navidrome");
+        return;
+    }
+
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    stream_stop_requested_ = false;
+    current_playback_id_++;
+    uint32_t my_playback_id = current_playback_id_;
+
+    xTaskCreate(
+        [](void* param) {
+            auto self = static_cast<CustomLcdDisplay*>(param);
+            uint32_t my_playback_id = self->current_playback_id_;
+
+            auto network = Board::GetInstance().GetNetwork();
+            if (!network) {
+                if (self->stream_task_handle_ == xTaskGetCurrentTaskHandle()) {
+                    self->stream_task_handle_ = nullptr;
+                }
+                vTaskDelete(NULL);
+                return;
+            }
+
+            size_t idx = self->current_track_idx_;
+            if (idx >= self->playlist_.size()) {
+                if (self->stream_task_handle_ == xTaskGetCurrentTaskHandle()) {
+                    self->stream_task_handle_ = nullptr;
+                }
+                vTaskDelete(NULL);
+                return;
+            }
+
+            std::string song_id = self->playlist_[idx].id;
+            std::string stream_url = self->navidrome_server_ + "/rest/stream.view?id=" + song_id +
+                                     "&format=opus&maxBitRate=96&u=" + self->navidrome_user_ +
+                                     "&p=" + self->navidrome_pass_ + "&v=1.16.1&c=xiaozhi";
+
+            ESP_LOGI(TAG, "Navidrome streaming start [%lu]: %s",
+                     (unsigned long)my_playback_id, self->playlist_[idx].title.c_str());
+
+            auto http = network->CreateHttp(0);
+            bool natural_finish = false;
+
+            if (http) {
+                http->SetTimeout(15000);
+                http->SetHeader("Accept", "audio/ogg, application/ogg");
+                http->SetHeader("Accept-Encoding", "identity");
+
+                if (http->Open("GET", stream_url)) {
+                    auto status = http->GetStatusCode();
+                    if (status && *status >= 200 && *status < 300 &&
+                        !self->stream_stop_requested_ && self->current_playback_id_ == my_playback_id) {
+
+                        auto demuxer = std::make_unique<OggDemuxer>();
+                        auto buffer = std::make_unique<std::array<char, 1024>>();
+                        uint32_t media_position_ms = 0;
+                        bool packet_error = false;
+
+                        demuxer->OnPacket([self, my_playback_id, &media_position_ms, &packet_error](
+                                              const uint8_t* data, int sample_rate,
+                                              int frame_duration_ms, size_t size) {
+                            if (packet_error || self->stream_stop_requested_ ||
+                                self->current_playback_id_ != my_playback_id) {
+                                packet_error = true;
+                                return;
+                            }
+
+                            auto packet = std::make_unique<AudioStreamPacket>();
+                            packet->sample_rate = sample_rate;
+                            packet->frame_duration = frame_duration_ms;
+                            packet->playback_id = my_playback_id;
+                            packet->media_position_ms = media_position_ms;
+                            packet->payload.assign(data, data + size);
+
+                            if (!Application::GetInstance().GetAudioService().PushPacketToDecodeQueue(
+                                    std::move(packet), true)) {
+                                packet_error = true;
+                                return;
+                            }
+                            media_position_ms += frame_duration_ms;
+                        });
+
+                        bool eof = false;
+                        while (!packet_error && !self->stream_stop_requested_ &&
+                               self->current_playback_id_ == my_playback_id) {
+                            auto read_size = http->Read(buffer->data(), buffer->size());
+                            if (!read_size) {
+                                ESP_LOGW(TAG, "Navidrome HTTP read error: %s",
+                                         read_size.error().ToString().c_str());
+                                break;
+                            }
+                            if (*read_size == 0) {
+                                eof = true;
+                                break;
+                            }
+                            demuxer->Process(reinterpret_cast<const uint8_t*>(buffer->data()), *read_size);
+                            if (demuxer->HasError()) {
+                                ESP_LOGE(TAG, "Navidrome demuxer error during decode");
+                                break;
+                            }
+                        }
+
+                        if (eof && !packet_error && !self->stream_stop_requested_ &&
+                            self->current_playback_id_ == my_playback_id) {
+                            if (demuxer->Finish()) {
+                                natural_finish = true;
+                            }
+                        }
+                    }
+                    http->Close();
+                }
+            }
+
+            if (natural_finish && !self->stream_stop_requested_ &&
+                self->current_playback_id_ == my_playback_id && self->is_playing_) {
+                ESP_LOGI(TAG, "Navidrome track finished naturally, advance to next track");
+                Application::GetInstance().Schedule([self]() {
+                    self->OnPlayerNextClicked();
+                });
+            }
+
+            if (self->stream_task_handle_ == xTaskGetCurrentTaskHandle()) {
+                self->stream_task_handle_ = nullptr;
+            }
+            vTaskDelete(NULL);
+        },
+        "navi_stream", 8192, this, 3, &stream_task_handle_);
+}
+
+void CustomLcdDisplay::OnPlayerPlayPauseClicked() {
+    is_playing_ = !is_playing_;
+    if (is_playing_) {
+        StartNavidromeStream(current_track_idx_);
+    } else {
+        StopNavidromeStream();
+    }
+    UpdatePlayerUI();
+}
+
+void CustomLcdDisplay::OnPlayerPrevClicked() {
+    if (playlist_.empty())
+        return;
+    if (current_track_idx_ == 0) {
+        current_track_idx_ = playlist_.size() - 1;
+    } else {
+        current_track_idx_--;
+    }
+    play_elapsed_sec_ = 0;
+    if (is_playing_) {
+        StartNavidromeStream(current_track_idx_);
+    }
+    UpdatePlayerUI();
+}
+
+void CustomLcdDisplay::OnPlayerNextClicked() {
+    if (playlist_.empty())
+        return;
+    current_track_idx_ = (current_track_idx_ + 1) % playlist_.size();
+    play_elapsed_sec_ = 0;
+    if (is_playing_) {
+        StartNavidromeStream(current_track_idx_);
+    }
+    UpdatePlayerUI();
+}
+
+void CustomLcdDisplay::CheckAndTriggerWeatherFetch() {
+    auto& app = Application::GetInstance();
+    auto state = app.GetDeviceState();
+
+    if (state != kDeviceStateIdle) {
+        return;
+    }
+
+    int64_t now_sec = esp_timer_get_time() / 1000000;
+    if (idle_start_sec_ == 0 || (now_sec - idle_start_sec_ < 25)) {
+        return;
+    }
+
+    if (weather_fetching_) {
+        return;
+    }
+
+    // 每 30 分钟刷新一次天气（1800 秒）
+    if (last_weather_fetch_sec_ != 0 && (now_sec - last_weather_fetch_sec_) < 1800) {
+        return;
+    }
+
+    last_weather_fetch_sec_ = now_sec;
+    weather_fetching_ = true;
+
+    xTaskCreate(
+        [](void* arg) {
+            auto self = static_cast<CustomLcdDisplay*>(arg);
+            self->FetchWeatherData();
+            self->weather_fetching_ = false;
+            vTaskDelete(NULL);
+        },
+        "weather_fetch", 8192, this, 1, nullptr);
+}
+
+void CustomLcdDisplay::FetchWeatherData() {
+    auto& app = Application::GetInstance();
+    auto state = app.GetDeviceState();
+    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+        return;
+    }
+
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    if (!network) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Auto fetching location & weather...");
+
+    std::string detected_city = "成都市";
+    // 1. 探测外网 IP 定位城市
+    auto http_loc = network->CreateHttp(0);
+    if (http_loc) {
+        if (http_loc->Open("GET", "http://myip.ipip.net/json")) {
+            auto status = http_loc->GetStatusCode();
+            if (status && *status == 200) {
+                std::string loc_body = http_loc->ReadAll();
+                cJSON* root = cJSON_Parse(loc_body.c_str());
+                if (root) {
+                    cJSON* data = cJSON_GetObjectItem(root, "data");
+                    if (data) {
+                        cJSON* loc_arr = cJSON_GetObjectItem(data, "location");
+                        if (loc_arr && cJSON_GetArraySize(loc_arr) >= 3) {
+                            cJSON* city_item = cJSON_GetArrayItem(loc_arr, 2);
+                            if (city_item && city_item->valuestring && strlen(city_item->valuestring) > 0) {
+                                detected_city = city_item->valuestring;
+                                if (detected_city.find("市") == std::string::npos) {
+                                    detected_city += "市";
+                                }
+                            }
+                        }
+                    }
+                    cJSON_Delete(root);
+                }
+            }
+            http_loc->Close();
+        }
+    }
+
+    // 2. 根据城市获取天气（成都市默认 citykey: 101270101）
+    std::string city_code = "101270101";
+    std::string weather_url = "http://t.weather.sojson.com/api/weather/city/" + city_code;
+
+    auto http_w = network->CreateHttp(0);
+    if (!http_w) {
+        return;
+    }
+
+    bool success = false;
+    std::string w_body;
+    if (http_w->Open("GET", weather_url)) {
+        auto status = http_w->GetStatusCode();
+        if (status && *status == 200) {
+            w_body = http_w->ReadAll();
+            success = true;
+        }
+        http_w->Close();
+    }
+
+    if (!success || w_body.empty()) {
+        ESP_LOGW(TAG, "Weather fetch failed, keeping current data");
+        return;
+    }
+
+    cJSON* root = cJSON_Parse(w_body.c_str());
+    if (!root) {
+        return;
+    }
+
+    cJSON* data = cJSON_GetObjectItem(root, "data");
+    if (data) {
+        TomorrowWeather tw = current_weather_;
+        tw.city = detected_city;
+
+        cJSON* wendu = cJSON_GetObjectItem(data, "wendu");
+        if (wendu && wendu->valuestring) {
+            float f_wendu = atof(wendu->valuestring);
+            char tbuf[16];
+            snprintf(tbuf, sizeof(tbuf), "%.0f", f_wendu);
+            tw.temp = tbuf;
+            tw.feels_like = std::string(tbuf) + "°";
+        }
+
+        cJSON* shidu = cJSON_GetObjectItem(data, "shidu");
+        if (shidu && shidu->valuestring) {
+            tw.humidity = shidu->valuestring;
+        }
+
+        cJSON* quality = cJSON_GetObjectItem(data, "quality");
+
+        cJSON* forecast = cJSON_GetObjectItem(data, "forecast");
+        if (forecast && cJSON_GetArraySize(forecast) > 0) {
+            cJSON* today = cJSON_GetArrayItem(forecast, 0);
+            if (today) {
+                cJSON* type = cJSON_GetObjectItem(today, "type");
+                cJSON* fx = cJSON_GetObjectItem(today, "fx");
+                cJSON* fl = cJSON_GetObjectItem(today, "fl");
+                cJSON* aqi = cJSON_GetObjectItem(today, "aqi");
+
+                std::string cond_str = type && type->valuestring ? type->valuestring : "多云";
+                if (fx && fx->valuestring) {
+                    tw.wind_dir = fx->valuestring;
+                    cond_str += " · ";
+                    cond_str += fx->valuestring;
+                }
+                tw.weather = cond_str;
+
+                if (fl && fl->valuestring) {
+                    tw.wind_level = fl->valuestring;
+                }
+
+                char aqi_buf[32];
+                int aqi_val = aqi ? aqi->valueint : 30;
+                const char* q_str = (quality && quality->valuestring) ? quality->valuestring : "优";
+                snprintf(aqi_buf, sizeof(aqi_buf), "AQI %d %s", aqi_val, q_str);
+                tw.aqi = aqi_buf;
+            }
+        }
+
+        Application::GetInstance().Schedule([this, tw]() {
+            this->UpdateTomorrowWeather(tw);
+        });
+    }
+
+    cJSON_Delete(root);
+}
+
+// ========================================================
+// 懒加载：第四屏 Cyber Control Center 下拉快捷控制中心
+// ========================================================
+void CustomLcdDisplay::EnsureSettingsUI() {
+    if (settings_ui_created_)
+        return;
+    settings_ui_created_ = true;
+
+    lv_obj_t* screen = lv_display_get_screen_active(lv_display_get_default());
+    settings_overlay_ = lv_obj_create(screen);
+    lv_obj_set_size(settings_overlay_, 360, 360);
+    lv_obj_align(settings_overlay_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(settings_overlay_, lv_color_hex(0x07090E), 0);
+    lv_obj_set_style_border_width(settings_overlay_, 0, 0);
+    lv_obj_set_style_pad_all(settings_overlay_, 0, 0);
+    lv_obj_set_style_radius(settings_overlay_, 180, 0);
+    lv_obj_remove_flag(settings_overlay_, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 设置页面手势监听（从下往上划关闭返回主页）
+    auto on_settings_gesture = [](lv_event_t* e) {
+        lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+        if (dir == LV_DIR_TOP) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->ShowHomePage();
+        }
+    };
+    lv_obj_add_event_cb(settings_overlay_, on_settings_gesture, LV_EVENT_GESTURE, this);
+
+    // 1. 顶部标题指引 (y: 26)
+    lv_obj_t* title_label = lv_label_create(settings_overlay_);
+    lv_label_set_text(title_label, "▲ CONTROL CENTER ▲");
+    lv_obj_set_style_text_font(title_label, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0x00E5FF), 0);
+    lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 26);
+
+    // 2. 亮度控制模块 (y: 58 ~ 118)
+    lv_obj_t* b_row = lv_obj_create(settings_overlay_);
+    lv_obj_set_size(b_row, 240, 24);
+    lv_obj_align(b_row, LV_ALIGN_TOP_MID, 0, 58);
+    lv_obj_set_style_bg_opa(b_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(b_row, 0, 0);
+    lv_obj_set_style_pad_all(b_row, 0, 0);
+    lv_obj_remove_flag(b_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* b_title = lv_label_create(b_row);
+    lv_label_set_text(b_title, "BRIGHTNESS");
+    lv_obj_set_style_text_font(b_title, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(b_title, lv_color_hex(0x94A3B8), 0);
+    lv_obj_align(b_title, LV_ALIGN_LEFT_MID, 0, 0);
+
+    brightness_val_label_ = lv_label_create(b_row);
+    lv_label_set_text(brightness_val_label_, "75%");
+    lv_obj_set_style_text_font(brightness_val_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(brightness_val_label_, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(brightness_val_label_, LV_ALIGN_RIGHT_MID, 0, 0);
+
+    // 亮度 Slider (y: 86)
+    brightness_slider_ = lv_slider_create(settings_overlay_);
+    lv_obj_set_size(brightness_slider_, 240, 22);
+    lv_obj_align(brightness_slider_, LV_ALIGN_TOP_MID, 0, 86);
+    lv_slider_set_range(brightness_slider_, 10, 100);
+    lv_slider_set_value(brightness_slider_, 75, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(brightness_slider_, lv_color_hex(0x1E293B), LV_PART_MAIN);
+    lv_obj_set_style_radius(brightness_slider_, 11, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(brightness_slider_, lv_color_hex(0x00E5FF), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(brightness_slider_, 11, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(brightness_slider_, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+    lv_obj_set_style_radius(brightness_slider_, 11, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(brightness_slider_, 3, LV_PART_KNOB);
+
+    lv_obj_add_event_cb(
+        brightness_slider_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            int val = lv_slider_get_value(self->brightness_slider_);
+            auto backlight = Board::GetInstance().GetBacklight();
+            if (backlight) {
+                backlight->SetBrightness(val);
+            }
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d%%", val);
+            if (self->brightness_val_label_) {
+                lv_label_set_text(self->brightness_val_label_, buf);
+            }
+        },
+        LV_EVENT_VALUE_CHANGED, this);
+
+    // 3. 音量控制模块 (y: 126 ~ 186)
+    lv_obj_t* v_row = lv_obj_create(settings_overlay_);
+    lv_obj_set_size(v_row, 240, 24);
+    lv_obj_align(v_row, LV_ALIGN_TOP_MID, 0, 126);
+    lv_obj_set_style_bg_opa(v_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(v_row, 0, 0);
+    lv_obj_set_style_pad_all(v_row, 0, 0);
+    lv_obj_remove_flag(v_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* v_title = lv_label_create(v_row);
+    lv_label_set_text(v_title, "VOLUME");
+    lv_obj_set_style_text_font(v_title, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(v_title, lv_color_hex(0x94A3B8), 0);
+    lv_obj_align(v_title, LV_ALIGN_LEFT_MID, 0, 0);
+
+    volume_val_label_ = lv_label_create(v_row);
+    lv_label_set_text(volume_val_label_, "60%");
+    lv_obj_set_style_text_font(volume_val_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(volume_val_label_, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(volume_val_label_, LV_ALIGN_RIGHT_MID, 0, 0);
+
+    // 音量 Slider (y: 154)
+    volume_slider_ = lv_slider_create(settings_overlay_);
+    lv_obj_set_size(volume_slider_, 240, 22);
+    lv_obj_align(volume_slider_, LV_ALIGN_TOP_MID, 0, 154);
+    lv_slider_set_range(volume_slider_, 0, 100);
+    lv_slider_set_value(volume_slider_, 60, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(volume_slider_, lv_color_hex(0x1E293B), LV_PART_MAIN);
+    lv_obj_set_style_radius(volume_slider_, 11, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(volume_slider_, lv_color_hex(0xF59E0B), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(volume_slider_, 11, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(volume_slider_, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+    lv_obj_set_style_radius(volume_slider_, 11, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(volume_slider_, 3, LV_PART_KNOB);
+
+    lv_obj_add_event_cb(
+        volume_slider_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            int val = lv_slider_get_value(self->volume_slider_);
+            auto codec = Board::GetInstance().GetAudioCodec();
+            if (codec) {
+                codec->SetOutputVolume(val);
+            }
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d%%", val);
+            if (self->volume_val_label_) {
+                lv_label_set_text(self->volume_val_label_, buf);
+            }
+        },
+        LV_EVENT_VALUE_CHANGED, this);
+
+    lv_obj_add_event_cb(
+        volume_slider_,
+        [](lv_event_t* e) {
+            Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
+        },
+        LV_EVENT_RELEASED, this);
+
+    // 4. 网络与 Navidrome 服务状态 (y: 198 ~ 250)
+    settings_wifi_label_ = lv_label_create(settings_overlay_);
+    lv_obj_set_style_text_font(settings_wifi_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(settings_wifi_label_, lv_color_hex(0x10B981), 0);
+    lv_label_set_text(settings_wifi_label_, "● WiFi: Connected");
+    lv_obj_align(settings_wifi_label_, LV_ALIGN_TOP_MID, 0, 198);
+
+    settings_navidrome_label_ = lv_label_create(settings_overlay_);
+    lv_obj_set_style_text_font(settings_navidrome_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(settings_navidrome_label_, lv_color_hex(0x60A5FA), 0);
+    lv_label_set_text(settings_navidrome_label_, "NAVI: 192.168.2.14:1011");
+    lv_obj_align(settings_navidrome_label_, LV_ALIGN_TOP_MID, 0, 224);
+
+    // 5. 底部收起胶囊按钮 (y: 266, w: 120, h: 36)
+    lv_obj_t* close_btn = lv_btn_create(settings_overlay_);
+    lv_obj_set_size(close_btn, 120, 36);
+    lv_obj_align(close_btn, LV_ALIGN_TOP_MID, 0, 264);
+    lv_obj_set_style_radius(close_btn, 18, 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_color(close_btn, lv_color_hex(0x334155), 0);
+    lv_obj_set_style_border_width(close_btn, 1, 0);
+    lv_obj_set_style_pad_all(close_btn, 0, 0);
+
+    lv_obj_t* close_label = lv_label_create(close_btn);
+    lv_label_set_text(close_label, "▲ CLOSE");
+    lv_obj_set_style_text_font(close_label, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(close_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(close_label, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_add_event_cb(
+        close_btn,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->ShowHomePage();
+        },
+        LV_EVENT_CLICKED, this);
+}
+
+void CustomLcdDisplay::UpdateSettingsValues() {
+    if (!settings_ui_created_)
+        return;
+
+    auto backlight = Board::GetInstance().GetBacklight();
+    if (backlight && brightness_slider_ && brightness_val_label_) {
+        int b = backlight->brightness();
+        lv_slider_set_value(brightness_slider_, b, LV_ANIM_OFF);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%%", b);
+        lv_label_set_text(brightness_val_label_, buf);
+    }
+
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (codec && volume_slider_ && volume_val_label_) {
+        int v = codec->output_volume();
+        lv_slider_set_value(volume_slider_, v, LV_ANIM_OFF);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%%", v);
+        lv_label_set_text(volume_val_label_, buf);
+    }
+
+    auto& wifi = WifiManager::GetInstance();
+    if (settings_wifi_label_) {
+        if (!wifi.IsConfigMode() && !wifi.GetIpAddress().empty()) {
+            std::string net_str = "● " + wifi.GetSsid() + " · " + wifi.GetIpAddress();
+            lv_label_set_text(settings_wifi_label_, net_str.c_str());
+        } else {
+            lv_label_set_text(settings_wifi_label_, "○ WiFi: Connecting...");
+        }
+    }
+
+    if (settings_navidrome_label_) {
+        std::string n_str = "NAVI: " + navidrome_server_;
+        if (n_str.find("http://") != std::string::npos) {
+            n_str.erase(n_str.find("http://"), 7);
+        }
+        if (!n_str.empty() && n_str.back() == '/') {
+            n_str.pop_back();
+        }
+        lv_label_set_text(settings_navidrome_label_, n_str.c_str());
+    }
+}
+
+void CustomLcdDisplay::SetNavidromeServer(const std::string& url) {
+    DisplayLockGuard lock(this);
+    navidrome_server_ = url;
+    UpdateSettingsValues();
+}
+
+void CustomLcdDisplay::FetchNavidromePlaylist() {
+    if (navidrome_fetching_)
+        return;
+    navidrome_fetching_ = true;
+
+    xTaskCreate(
+        [](void* param) {
+            auto self = static_cast<CustomLcdDisplay*>(param);
+            auto network = Board::GetInstance().GetNetwork();
+            if (!network) {
+                self->navidrome_fetching_ = false;
+                vTaskDelete(NULL);
+                return;
+            }
+
+            std::string url = self->navidrome_server_ + "/rest/getRandomSongs.view?u=" +
+                              self->navidrome_user_ + "&p=" + self->navidrome_pass_ +
+                              "&v=1.16.1&c=xiaozhi&f=json&size=10";
+
+            ESP_LOGI(TAG, "Fetching Navidrome songs from: %s", self->navidrome_server_.c_str());
+
+            auto http = network->CreateHttp(0);
+            if (http) {
+                http->SetTimeout(8000);
+                if (http->Open("GET", url)) {
+                    auto status = http->GetStatusCode();
+                    if (status && *status == 200) {
+                        std::string body = http->ReadAll();
+                        cJSON* root = cJSON_Parse(body.c_str());
+                        if (root) {
+                            cJSON* resp = cJSON_GetObjectItem(root, "subsonic-response");
+                            if (resp) {
+                                cJSON* random_songs = cJSON_GetObjectItem(resp, "randomSongs");
+                                if (random_songs) {
+                                    cJSON* song_arr = cJSON_GetObjectItem(random_songs, "song");
+                                    if (song_arr && cJSON_IsArray(song_arr)) {
+                                        int count = cJSON_GetArraySize(song_arr);
+                                        std::vector<MusicTrack> new_list;
+                                        for (int i = 0; i < count; i++) {
+                                            cJSON* s = cJSON_GetArrayItem(song_arr, i);
+                                            if (!s)
+                                                continue;
+                                            MusicTrack t;
+                                            cJSON* id = cJSON_GetObjectItem(s, "id");
+                                            cJSON* title = cJSON_GetObjectItem(s, "title");
+                                            cJSON* artist = cJSON_GetObjectItem(s, "artist");
+                                            cJSON* duration = cJSON_GetObjectItem(s, "duration");
+                                            if (id && id->valuestring)
+                                                t.id = id->valuestring;
+                                            if (title && title->valuestring)
+                                                t.title = title->valuestring;
+                                            if (artist && artist->valuestring)
+                                                t.artist = artist->valuestring;
+                                            if (duration)
+                                                t.duration_sec = duration->valueint;
+                                            t.source = "NAVIDROME";
+                                            new_list.push_back(std::move(t));
+                                        }
+                                        if (!new_list.empty()) {
+                                            ESP_LOGI(TAG, "Navidrome loaded %d songs successfully",
+                                                     (int)new_list.size());
+                                            Application::GetInstance().Schedule(
+                                                [self, new_list = std::move(new_list)]() mutable {
+                                                    self->playlist_ = std::move(new_list);
+                                                    self->current_track_idx_ = 0;
+                                                    self->play_elapsed_sec_ = 0;
+                                                    self->UpdatePlayerUI();
+                                                    self->UpdateSettingsValues();
+                                                });
+                                        }
+                                    }
+                                }
+                            }
+                            cJSON_Delete(root);
+                        }
+                    }
+                    http->Close();
+                }
+            }
+
+            self->navidrome_fetching_ = false;
+            vTaskDelete(NULL);
+        },
+        "navi_fetch", 4096, this, 3, NULL);
+}
+
+
