@@ -314,22 +314,33 @@ private:
     void StartAutoHideTimer(uint32_t delay_ms = 10000);
     void StopAutoHideTimer();
 
+    // 配网与设备引导界面（WiFi Provisioning Screen）
+    void SetupWifiConfigOverlay();
+    void ShowWifiConfigOverlay(const std::string& ssid = "", const std::string& url = "", const std::string& code = "");
+    void HideWifiConfigOverlay();
+
     lv_obj_t* wakeup_overlay_ = nullptr;        // 360x360 全屏黑底容器
     lv_obj_t* wakeup_orb_core_ = nullptr;       // 中央能量球核心
     lv_obj_t* wakeup_orbit_arc_ = nullptr;      // 环绕刻度圈
     lv_obj_t* wakeup_title_label_ = nullptr;    // “正在聆听” / “小智思考中” / “正在播报”
-    lv_obj_t* wakeup_subtitle_label_ = nullptr; // “LISTENING · RAW SPEECH”
     lv_obj_t* wakeup_cursor_ = nullptr;         // 闪烁光标
 
     // 动态互斥展示区：频谱 VS 播报文本
     lv_obj_t* wakeup_vu_container_ = nullptr;   // 频谱与分贝容器
     lv_obj_t* wakeup_vu_bars_[10] = {nullptr};  // 10 根声压条
     lv_obj_t* wakeup_db_label_ = nullptr;       // 分贝数值
-    lv_obj_t* wakeup_text_container_ = nullptr; // 播报文本滚动容器
+    lv_obj_t* wakeup_text_container_ = nullptr; // 播报文本透明容器
     lv_obj_t* wakeup_text_label_ = nullptr;     // 文本内容标签
 
     lv_timer_t* wakeup_timer_ = nullptr;        // 40ms 高帧率律动定时器
     esp_timer_handle_t auto_hide_timer_ = nullptr; // 10秒无输入/播报完成自动退出
+
+    // 配网模式界面控件
+    lv_obj_t* wifi_config_overlay_ = nullptr;
+    lv_obj_t* wifi_config_ssid_val_ = nullptr;
+    lv_obj_t* wifi_config_url_val_ = nullptr;
+    lv_obj_t* wifi_config_code_box_ = nullptr;
+    lv_obj_t* wifi_config_code_val_ = nullptr;
 };
 
 #endif  // CUSTOM_LCD_DISPLAY_H

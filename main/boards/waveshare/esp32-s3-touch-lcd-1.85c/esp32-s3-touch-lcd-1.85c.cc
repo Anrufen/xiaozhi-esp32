@@ -430,13 +430,18 @@ private:
     }
 
     void InitializeButtons() {
-        boot_button_.OnClick([this]() {
+        boot_button_.OnPressDown([this]() {
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
                 return;
             }
             app.ToggleChatState();
+        });
+
+        boot_button_.OnLongPress([this]() {
+            ESP_LOGI(TAG, "Boot button long pressed -> EnterWifiConfigMode");
+            EnterWifiConfigMode();
         });
     }
 
