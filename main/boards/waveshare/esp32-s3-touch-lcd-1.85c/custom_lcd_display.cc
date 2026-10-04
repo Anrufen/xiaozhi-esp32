@@ -66,6 +66,11 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
 }
 
 CustomLcdDisplay::~CustomLcdDisplay() {
+    StopAutoHideTimer();
+    if (auto_hide_timer_) {
+        esp_timer_delete(auto_hide_timer_);
+        auto_hide_timer_ = nullptr;
+    }
     if (clock_timer_) {
         lv_timer_delete(clock_timer_);
         clock_timer_ = nullptr;
@@ -280,6 +285,9 @@ void CustomLcdDisplay::SetupUI() {
             self->CheckAndTriggerWeatherFetch();
         },
         1000, this);
+
+    // 5. 初始化全局顶层唤醒交互与呼吸弧线
+    SetupWakeupOverlay();
 }
 
 void CustomLcdDisplay::SetTheme(Theme* theme) {
@@ -318,6 +326,167 @@ void CustomLcdDisplay::SetEmotion(const char* emotion) {
     }
 }
 
+static void WakeupArcAnimCb(void* var, int32_t val) {
+    auto* arc = static_cast<lv_obj_t*>(var);
+    if (!arc) {
+        return;
+    }
+    lv_obj_set_style_arc_opa(arc, (lv_opa_t)val, LV_PART_INDICATOR);
+    lv_obj_set_style_shadow_opa(arc, (lv_opa_t)val, LV_PART_INDICATOR);
+}
+
+void CustomLcdDisplay::SetupWakeupOverlay() {
+    // 挂在全局顶层图层 lv_layer_top()，跨所有屏幕（时钟/天气/音乐/设置/监控）全屏贯通
+    wakeup_overlay_ = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(wakeup_overlay_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_pos(wakeup_overlay_, 0, 0);
+    lv_obj_set_style_bg_opa(wakeup_overlay_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(wakeup_overlay_, 0, 0);
+    lv_obj_set_style_pad_all(wakeup_overlay_, 0, 0);
+    lv_obj_set_scrollbar_mode(wakeup_overlay_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(wakeup_overlay_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(wakeup_overlay_, LV_OBJ_FLAG_HIDDEN);
+
+    // 点击浮层任意空白处，快速隐藏收起浮层
+    lv_obj_add_event_cb(
+        wakeup_overlay_,
+        [](lv_event_t* e) {
+            auto* self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            if (self) {
+                self->HideWakeupOverlay();
+            }
+        },
+        LV_EVENT_CLICKED, this);
+
+    // 1. 底部呼吸圆弧 (344x344 贴合 1.85 寸圆形外边沿，角度 50° ~ 130° 处于正底部)
+    wakeup_arc_ = lv_arc_create(wakeup_overlay_);
+    lv_obj_set_size(wakeup_arc_, 344, 344);
+    lv_obj_align(wakeup_arc_, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_angles(wakeup_arc_, 50, 130);
+    lv_arc_set_bg_angles(wakeup_arc_, 50, 130);
+    lv_obj_remove_style(wakeup_arc_, nullptr, LV_PART_KNOB);
+    lv_obj_set_style_arc_opa(wakeup_arc_, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(wakeup_arc_, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(wakeup_arc_, lv_color_hex(0x00E5FF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(wakeup_arc_, true, LV_PART_INDICATOR);
+    lv_obj_set_style_shadow_width(wakeup_arc_, 16, LV_PART_INDICATOR);
+    lv_obj_set_style_shadow_color(wakeup_arc_, lv_color_hex(0x00E5FF), LV_PART_INDICATOR);
+    lv_obj_set_style_shadow_opa(wakeup_arc_, 200, LV_PART_INDICATOR);
+    lv_obj_remove_flag(wakeup_arc_, LV_OBJ_FLAG_CLICKABLE);
+
+    // 2. 悬浮问答卡片（深色毛玻璃微光卡片，居中偏下对齐，不挡中央大时钟）
+    wakeup_card_ = lv_obj_create(wakeup_overlay_);
+    lv_obj_set_size(wakeup_card_, 284, LV_SIZE_CONTENT);
+    lv_obj_align(wakeup_card_, LV_ALIGN_BOTTOM_MID, 0, -42);
+    lv_obj_set_style_bg_color(wakeup_card_, lv_color_hex(0x0B1220), 0);
+    lv_obj_set_style_bg_opa(wakeup_card_, 230, 0);
+    lv_obj_set_style_radius(wakeup_card_, 16, 0);
+    lv_obj_set_style_border_width(wakeup_card_, 1, 0);
+    lv_obj_set_style_border_color(wakeup_card_, lv_color_hex(0x00E5FF), 0);
+    lv_obj_set_style_border_opa(wakeup_card_, 120, 0);
+    lv_obj_set_style_pad_hor(wakeup_card_, 14, 0);
+    lv_obj_set_style_pad_ver(wakeup_card_, 8, 0);
+    lv_obj_set_style_shadow_width(wakeup_card_, 18, 0);
+    lv_obj_set_style_shadow_color(wakeup_card_, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_opa(wakeup_card_, 160, 0);
+    lv_obj_set_scrollbar_mode(wakeup_card_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(wakeup_card_, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 状态标题标签（如：● 正在聆听... / ● 思考中... / ● 小智：）
+    wakeup_status_label_ = lv_label_create(wakeup_card_);
+    lv_obj_set_style_text_font(wakeup_status_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(wakeup_status_label_, lv_color_hex(0x00E5FF), 0);
+    lv_label_set_text(wakeup_status_label_, "● 正在聆听...");
+    lv_obj_align(wakeup_status_label_, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    // 问答文字标签（自动换行，中英混排展示输入与输出）
+    wakeup_text_label_ = lv_label_create(wakeup_card_);
+    lv_obj_set_width(wakeup_text_label_, 256);
+    lv_label_set_long_mode(wakeup_text_label_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(wakeup_text_label_, lv_color_hex(0xF8FAFC), 0);
+    lv_label_set_text(wakeup_text_label_, "请对我说话...");
+    lv_obj_align(wakeup_text_label_, LV_ALIGN_TOP_LEFT, 0, 20);
+
+    // 3. 创建 10 秒自动退出定时器
+    esp_timer_create_args_t timer_args = {
+        .callback =
+            [](void* arg) {
+                auto* self = static_cast<CustomLcdDisplay*>(arg);
+                if (self) {
+                    Application::GetInstance().Schedule([self]() { self->HideWakeupOverlay(); });
+                }
+            },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "wakeup_hide_timer",
+        .skip_unhandled_events = false,
+    };
+    esp_timer_create(&timer_args, &auto_hide_timer_);
+}
+
+void CustomLcdDisplay::ShowWakeupOverlay() {
+    DisplayLockGuard lock(this);
+    if (!wakeup_overlay_) {
+        return;
+    }
+    StopAutoHideTimer();
+    lv_obj_remove_flag(wakeup_overlay_, LV_OBJ_FLAG_HIDDEN);
+    StartWakeupBreathingAnim();
+}
+
+void CustomLcdDisplay::HideWakeupOverlay() {
+    DisplayLockGuard lock(this);
+    if (!wakeup_overlay_) {
+        return;
+    }
+    StopAutoHideTimer();
+    StopWakeupBreathingAnim();
+    lv_obj_add_flag(wakeup_overlay_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void CustomLcdDisplay::StartWakeupBreathingAnim() {
+    if (wakeup_anim_running_ || !wakeup_arc_) {
+        return;
+    }
+    wakeup_anim_running_ = true;
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, wakeup_arc_);
+    lv_anim_set_values(&a, 50, 255);
+    lv_anim_set_duration(&a, 900);
+    lv_anim_set_playback_duration(&a, 900);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)WakeupArcAnimCb);
+    lv_anim_start(&a);
+}
+
+void CustomLcdDisplay::StopWakeupBreathingAnim() {
+    if (!wakeup_anim_running_ || !wakeup_arc_) {
+        return;
+    }
+    wakeup_anim_running_ = false;
+    lv_anim_delete(wakeup_arc_, nullptr);
+    if (wakeup_arc_) {
+        lv_obj_set_style_arc_opa(wakeup_arc_, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_shadow_opa(wakeup_arc_, 200, LV_PART_INDICATOR);
+    }
+}
+
+void CustomLcdDisplay::StartAutoHideTimer(uint32_t delay_ms) {
+    StopAutoHideTimer();
+    if (auto_hide_timer_) {
+        esp_timer_start_once(auto_hide_timer_, (uint64_t)delay_ms * 1000ULL);
+    }
+}
+
+void CustomLcdDisplay::StopAutoHideTimer() {
+    if (auto_hide_timer_) {
+        esp_timer_stop(auto_hide_timer_);
+    }
+}
+
 void CustomLcdDisplay::SetStatus(const char* status) {
     DisplayLockGuard lock(this);
     // 隐藏基类状态栏，防止顶部时间药丸和表盘重叠冲突
@@ -327,6 +496,107 @@ void CustomLcdDisplay::SetStatus(const char* status) {
     if (status_label_) {
         lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
     }
+
+    if (!status || !wakeup_overlay_) {
+        return;
+    }
+
+    std::string s(status);
+    if (s == Lang::Strings::LISTENING || s.find("Listening") != std::string::npos ||
+        s.find("正在聆听") != std::string::npos) {
+        // 唤醒进入等待输入状态：展开浮层，开启呼吸，提示输入
+        ShowWakeupOverlay();
+        if (wakeup_status_label_) {
+            lv_obj_set_style_text_color(wakeup_status_label_, lv_color_hex(0x00E5FF), 0);
+            lv_label_set_text(wakeup_status_label_, "● 正在聆听...");
+        }
+        if (wakeup_text_label_) {
+            lv_label_set_text(wakeup_text_label_, "请对我说话...");
+        }
+    } else if (s.find("Thinking") != std::string::npos || s.find("思考") != std::string::npos) {
+        ShowWakeupOverlay();
+        if (wakeup_status_label_) {
+            lv_obj_set_style_text_color(wakeup_status_label_, lv_color_hex(0xBD00FF), 0);
+            lv_label_set_text(wakeup_status_label_, "● 思考中...");
+        }
+    } else if (s == Lang::Strings::SPEAKING || s.find("Speaking") != std::string::npos ||
+               s.find("正在说话") != std::string::npos) {
+        // 播报中：停止退出定时器，圆环常亮
+        ShowWakeupOverlay();
+        StopWakeupBreathingAnim();
+        if (wakeup_status_label_) {
+            lv_obj_set_style_text_color(wakeup_status_label_, lv_color_hex(0x00FF9D), 0);
+            lv_label_set_text(wakeup_status_label_, "● 小智播报中");
+        }
+    } else if (s == Lang::Strings::STANDBY || s.find("Standby") != std::string::npos ||
+               s.find("待命") != std::string::npos) {
+        // 播报完毕/进入待机：启动 10 秒自动退出定时器
+        if (wakeup_status_label_) {
+            lv_obj_set_style_text_color(wakeup_status_label_, lv_color_hex(0x94A3B8), 0);
+            lv_label_set_text(wakeup_status_label_, "● 对话结束 (10s后退出)");
+        }
+        StartAutoHideTimer(10000);
+    }
+}
+
+void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
+    DisplayLockGuard lock(this);
+    if (!content || !wakeup_overlay_) {
+        return;
+    }
+
+    std::string r = role ? role : "";
+    std::string text = content;
+
+    // 过滤掉无意义系统空指令
+    if (r == "system") {
+        if (!text.empty() && text.find("Upgrade") != std::string::npos) {
+            ShowWakeupOverlay();
+            if (wakeup_status_label_) {
+                lv_obj_set_style_text_color(wakeup_status_label_, lv_color_hex(0xFBBF24), 0);
+                lv_label_set_text(wakeup_status_label_, "● 系统通知");
+            }
+            if (wakeup_text_label_) {
+                lv_label_set_text(wakeup_text_label_, text.c_str());
+            }
+            StartAutoHideTimer(5000);
+        }
+        return;
+    }
+
+    if (text.empty()) {
+        return;
+    }
+
+    // 只要有实际对话内容，显示悬浮交互窗并重置退出定时器
+    ShowWakeupOverlay();
+
+    if (r == "user") {
+        // 用户说话内容（输入识别完成展示）
+        if (wakeup_status_label_) {
+            lv_obj_set_style_text_color(wakeup_status_label_, lv_color_hex(0x38BDF8), 0);
+            lv_label_set_text(wakeup_status_label_, "“ 我：");
+        }
+        if (wakeup_text_label_) {
+            lv_label_set_text(wakeup_text_label_, text.c_str());
+        }
+    } else if (r == "assistant") {
+        // 小智回复内容（输出文本展示）
+        StopWakeupBreathingAnim();
+        if (wakeup_status_label_) {
+            lv_obj_set_style_text_color(wakeup_status_label_, lv_color_hex(0x00FF9D), 0);
+            lv_label_set_text(wakeup_status_label_, "● 小智：");
+        }
+        if (wakeup_text_label_) {
+            lv_label_set_text(wakeup_text_label_, text.c_str());
+        }
+    }
+}
+
+void CustomLcdDisplay::ClearChatMessages() {
+    DisplayLockGuard lock(this);
+    // 播报结束时不立即抹掉文字，启动 10 秒倒计时供用户阅读，超时后平滑隐藏
+    StartAutoHideTimer(10000);
 }
 
 void CustomLcdDisplay::SetupHomeDashboardUI() {

@@ -77,6 +77,8 @@ public:
     virtual void SetTheme(Theme* theme) override;
     virtual void SetEmotion(const char* emotion) override;
     virtual void SetStatus(const char* status) override;
+    virtual void SetChatMessage(const char* role, const char* content) override;
+    virtual void ClearChatMessages() override;
 
     void UpdateTomorrowWeather(const TomorrowWeather& weather);
     void ShowWeatherPage();
@@ -303,6 +305,23 @@ private:
     int64_t last_server_fetch_sec_ = 0;
     bool server_fetching_ = false;
 #endif
+
+    // 全局唤醒交互悬浮层与底部呼吸圆环控制
+    void SetupWakeupOverlay();
+    void ShowWakeupOverlay();
+    void HideWakeupOverlay();
+    void StartWakeupBreathingAnim();
+    void StopWakeupBreathingAnim();
+    void StartAutoHideTimer(uint32_t delay_ms = 10000);
+    void StopAutoHideTimer();
+
+    lv_obj_t* wakeup_overlay_ = nullptr;
+    lv_obj_t* wakeup_arc_ = nullptr;
+    lv_obj_t* wakeup_card_ = nullptr;
+    lv_obj_t* wakeup_status_label_ = nullptr;
+    lv_obj_t* wakeup_text_label_ = nullptr;
+    bool wakeup_anim_running_ = false;
+    esp_timer_handle_t auto_hide_timer_ = nullptr;
 };
 
 #endif  // CUSTOM_LCD_DISPLAY_H
