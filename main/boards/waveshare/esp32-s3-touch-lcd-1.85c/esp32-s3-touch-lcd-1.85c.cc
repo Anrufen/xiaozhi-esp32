@@ -697,6 +697,24 @@ private:
                 }
                 return msg;
             });
+
+        mcp_server.AddTool(
+            "self.dlna.add_device",
+            "通过 IP 地址或 URL 手动探测并添加局域网 DLNA 设备（应对路由器禁用组播或 AP 隔离）",
+            PropertyList({Property("host", kPropertyTypeString, std::string(""))}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string host = properties["host"].value<std::string>();
+                if (host.empty()) {
+                    return std::string("Error: host is empty");
+                }
+                bool ok = waveshare185c::DlnaController::GetInstance().ProbeAndAddDevice(host);
+                if (ok) {
+                    display_->UpdateCastModalDeviceList();
+                    display_->UpdatePlayerUI();
+                    return std::string("Device successfully probed and added to list");
+                }
+                return std::string("Failed to probe DLNA device at: " + host + ". Please check IP and port.");
+            });
 #endif
 
 #if CONFIG_WS185C_ENABLE_BESZEL

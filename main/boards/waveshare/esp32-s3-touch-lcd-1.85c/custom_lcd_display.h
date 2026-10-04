@@ -120,10 +120,11 @@ public:
     int GetCurrentPlaybackTarget() const;
     std::string GetCurrentPlaybackTargetName() const;
 
-    // 投播弹窗控制
+    // 投播弹窗控制与 UI 刷新
     void ShowCastModal();
     void HideCastModal();
     void UpdateCastModalDeviceList();
+    void UpdatePlayerUI();
 #endif
 
 #if CONFIG_WS185C_ENABLE_BESZEL
@@ -219,7 +220,6 @@ private:
 #if CONFIG_WS185C_ENABLE_NAVIDROME
     // 懒加载第三屏：极客机能音乐播放器（Cyber HUD Music Player）
     void EnsurePlayerUI();
-    void UpdatePlayerUI();
 
     // 播放器页面（覆盖层方式，懒加载）
     lv_obj_t* player_overlay_ = nullptr;

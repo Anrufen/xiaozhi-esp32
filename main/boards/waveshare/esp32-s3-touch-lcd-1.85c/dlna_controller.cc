@@ -126,6 +126,73 @@ bool DlnaController::ParseDeviceXml(const std::string& xml, const std::string& b
     return !out_name.empty() && !out_control_url.empty();
 }
 
+bool DlnaController::ProbeAndAddDevice(const std::string& location_url) {
+    if (location_url.empty()) return false;
+    auto network = Board::GetInstance().GetNetwork();
+    if (!network) return false;
+
+    std::vector<std::string> urls_to_try;
+    if (location_url.rfind("http://", 0) == 0 || location_url.rfind("https://", 0) == 0) {
+        urls_to_try.push_back(location_url);
+    } else {
+        // 用户传入的是单纯 IP 或 IP:端口
+        std::string host = location_url;
+        if (host.find(':') != std::string::npos) {
+            urls_to_try.push_back("http://" + host + "/description.xml");
+            urls_to_try.push_back("http://" + host + "/devicedesc.xml");
+            urls_to_try.push_back("http://" + host + "/rootDesc.xml");
+        } else {
+            // 常见 DLNA 端口列表（小米电视/音箱常用 49152, 49153, 49154, 8080, 8200）
+            const char* common_ports[] = {"49152", "49153", "49154", "8080", "8200", "1900"};
+            for (const char* port : common_ports) {
+                urls_to_try.push_back("http://" + host + ":" + port + "/description.xml");
+                urls_to_try.push_back("http://" + host + ":" + port + "/devicedesc.xml");
+                urls_to_try.push_back("http://" + host + ":" + port + "/rootDesc.xml");
+            }
+        }
+    }
+
+    for (const auto& url : urls_to_try) {
+        ESP_LOGI(TAG, "Probing DLNA at: %s", url.c_str());
+        auto http = network->CreateHttp(0);
+        if (!http) continue;
+        http->SetTimeout(2500);
+        if (http->Open("GET", url)) {
+            auto status = http->GetStatusCode();
+            if (status && *status == 200) {
+                std::string xml = http->ReadAll();
+                std::string base_url = GetBaseUrl(url);
+                std::string name, ctrl_url, udn;
+                if (ParseDeviceXml(xml, base_url, name, ctrl_url, udn)) {
+                    DlnaDevice dev;
+                    dev.name = name;
+                    dev.control_url = ctrl_url;
+                    dev.location = url;
+                    dev.udn = udn;
+                    ESP_LOGI(TAG, "Manual DLNA probe success: [%s] -> %s", name.c_str(), ctrl_url.c_str());
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        // 去重
+                        bool exists = false;
+                        for (auto& d : devices_) {
+                            if (d.control_url == ctrl_url || (!udn.empty() && d.udn == udn)) {
+                                d = dev;
+                                exists = true;
+                                break;
+                            }
+                        }
+                        if (!exists) {
+                            devices_.push_back(std::move(dev));
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 void DlnaController::StartDiscovery(DeviceListCallback on_update) {
     if (is_scanning_) {
         ESP_LOGI(TAG, "Discovery already running, skip");
@@ -135,12 +202,13 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update) {
     is_scanning_ = true;
     on_update_cb_ = std::move(on_update);
 
+    // 提升任务栈至 8192 字节，避免接收长 XML 时发生栈溢出重启
     xTaskCreate(
         [](void* param) {
             auto self = static_cast<DlnaController*>(param);
-            ESP_LOGI(TAG, "Starting DLNA SSDP discovery task...");
+            ESP_LOGI(TAG, "Starting robust DLNA SSDP discovery task (stack 8KB)...");
 
-            int sock = socket(AF_INET, SOCK_DGRAM, 0);
+            int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
             if (sock < 0) {
                 ESP_LOGE(TAG, "Failed to create UDP socket for SSDP");
                 self->is_scanning_ = false;
@@ -148,11 +216,25 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update) {
                 return;
             }
 
-            // 设置 1500ms 接收超时
+            // 关键：必须显式绑定本地地址和随机端口，否则无法接收小米电视/音箱单播回包
+            struct sockaddr_in local_addr;
+            memset(&local_addr, 0, sizeof(local_addr));
+            local_addr.sin_family = AF_INET;
+            local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+            local_addr.sin_port = htons(0);
+            if (bind(sock, (struct sockaddr*)&local_addr, sizeof(local_addr)) < 0) {
+                ESP_LOGW(TAG, "SSDP bind local port failed, errno=%d", errno);
+            }
+
+            // 设置 2000ms 接收超时
             struct timeval tv;
-            tv.tv_sec = 1;
-            tv.tv_usec = 500000;
+            tv.tv_sec = 2;
+            tv.tv_usec = 0;
             setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+            // 设置组播 TTL
+            uint8_t ttl = 4;
+            setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
 
             struct sockaddr_in dest_addr;
             memset(&dest_addr, 0, sizeof(dest_addr));
@@ -160,43 +242,59 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update) {
             dest_addr.sin_addr.s_addr = inet_addr("239.255.255.250");
             dest_addr.sin_port = htons(1900);
 
-            // 针对 AVTransport 和 MediaRenderer 分别发送 M-SEARCH
+            // 针对小米电视/小爱音箱等设备的标准广谱探测报文
             const char* queries[] = {
                 "M-SEARCH * HTTP/1.1\r\n"
                 "HOST: 239.255.255.250:1900\r\n"
                 "MAN: \"ssdp:discover\"\r\n"
                 "MX: 2\r\n"
-                "ST: urn:schemas-upnp-org:service:AVTransport:1\r\n\r\n",
+                "ST: ssdp:all\r\n\r\n",
 
                 "M-SEARCH * HTTP/1.1\r\n"
                 "HOST: 239.255.255.250:1900\r\n"
                 "MAN: \"ssdp:discover\"\r\n"
                 "MX: 2\r\n"
-                "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n"
+                "ST: upnp:rootdevice\r\n\r\n",
+
+                "M-SEARCH * HTTP/1.1\r\n"
+                "HOST: 239.255.255.250:1900\r\n"
+                "MAN: \"ssdp:discover\"\r\n"
+                "MX: 2\r\n"
+                "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n",
+
+                "M-SEARCH * HTTP/1.1\r\n"
+                "HOST: 239.255.255.250:1900\r\n"
+                "MAN: \"ssdp:discover\"\r\n"
+                "MX: 2\r\n"
+                "ST: urn:schemas-upnp-org:service:AVTransport:1\r\n\r\n"
             };
 
+            // 广播发送探测报文
             for (const char* q : queries) {
                 sendto(sock, q, strlen(q), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
             }
 
             std::set<std::string> discovered_locations;
-            char rx_buf[1024];
+            auto rx_buf = std::make_unique<char[]>(2048);
 
             while (true) {
                 struct sockaddr_in src_addr;
                 socklen_t addr_len = sizeof(src_addr);
-                int len = recvfrom(sock, rx_buf, sizeof(rx_buf) - 1, 0,
+                int len = recvfrom(sock, rx_buf.get(), 2047, 0,
                                    (struct sockaddr*)&src_addr, &addr_len);
                 if (len <= 0) {
                     break;  // 超时退出
                 }
                 rx_buf[len] = '\0';
-                std::string resp(rx_buf);
+                std::string resp(rx_buf.get());
 
-                // 提取 LOCATION 字段
+                // 提取 LOCATION 字段（不区分大小写）
                 size_t loc_pos = resp.find("LOCATION:");
                 if (loc_pos == std::string::npos) {
                     loc_pos = resp.find("Location:");
+                }
+                if (loc_pos == std::string::npos) {
+                    loc_pos = resp.find("location:");
                 }
 
                 if (loc_pos != std::string::npos) {
@@ -213,7 +311,7 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update) {
             }
 
             close(sock);
-            ESP_LOGI(TAG, "SSDP probing complete, found %d unique locations",
+            ESP_LOGI(TAG, "SSDP probing complete, found %d candidate locations",
                      (int)discovered_locations.size());
 
             auto network = Board::GetInstance().GetNetwork();
@@ -221,12 +319,12 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update) {
 
             if (network) {
                 for (const auto& loc : discovered_locations) {
-                    ESP_LOGI(TAG, "Fetching DLNA device desc: %s", loc.c_str());
+                    ESP_LOGI(TAG, "Fetching device desc from: %s", loc.c_str());
                     auto http = network->CreateHttp(0);
                     if (!http) {
                         continue;
                     }
-                    http->SetTimeout(4000);
+                    http->SetTimeout(3500);
                     if (http->Open("GET", loc)) {
                         auto status = http->GetStatusCode();
                         if (status && *status == 200) {
@@ -239,7 +337,7 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update) {
                                 dev.control_url = ctrl_url;
                                 dev.location = loc;
                                 dev.udn = udn;
-                                ESP_LOGI(TAG, "Discovered DLNA DMR: [%s] -> %s", name.c_str(),
+                                ESP_LOGI(TAG, "Valid DLNA device found: [%s] -> %s", name.c_str(),
                                          ctrl_url.c_str());
                                 valid_devs.push_back(std::move(dev));
                             }
@@ -251,25 +349,39 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update) {
             // 更新设备列表
             {
                 std::lock_guard<std::mutex> lock(self->mutex_);
-                self->devices_ = valid_devs;
-                // 如果当前选定的设备索引超出范围，重置为 -1 (本地播放)
+                // 合并现有设备与新发现设备
+                for (auto& new_d : valid_devs) {
+                    bool exists = false;
+                    for (auto& old_d : self->devices_) {
+                        if (old_d.control_url == new_d.control_url ||
+                            (!new_d.udn.empty() && old_d.udn == new_d.udn)) {
+                            old_d = new_d;
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists) {
+                        self->devices_.push_back(std::move(new_d));
+                    }
+                }
+
                 if (self->target_index_ >= (int)self->devices_.size()) {
                     self->target_index_ = -1;
                 }
                 self->is_scanning_ = false;
             }
 
-            // 调度到主线程回调通知
             if (self->on_update_cb_) {
                 auto cb = self->on_update_cb_;
-                Application::GetInstance().Schedule([cb, valid_devs]() {
-                    cb(valid_devs);
+                auto current_devices = self->GetDevices();
+                Application::GetInstance().Schedule([cb, current_devices]() {
+                    cb(current_devices);
                 });
             }
 
             vTaskDelete(NULL);
         },
-        "dlna_ssdp", 4096, this, 3, NULL);
+        "dlna_ssdp", 8192, this, 3, NULL);
 }
 
 std::vector<DlnaDevice> DlnaController::GetDevices() const {

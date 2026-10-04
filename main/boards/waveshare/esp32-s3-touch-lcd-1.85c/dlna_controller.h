@@ -27,6 +27,9 @@ public:
     // 获取当前发现的所有有效 DLNA 渲染器
     std::vector<DlnaDevice> GetDevices() const;
 
+    // 手动通过 URL 或 IP 探测并添加 DLNA 设备（应对路由器禁用组播/AP隔离的情况）
+    bool ProbeAndAddDevice(const std::string& location_url);
+
     // 设置/获取当前选中的播放设备（-1 表示本机喇叭，>=0 表示 devices 索引）
     void SetTargetIndex(int index);
     int GetTargetIndex() const;
