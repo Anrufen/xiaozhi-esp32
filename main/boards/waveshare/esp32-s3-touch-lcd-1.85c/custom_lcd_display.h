@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "display/lcd_display.h"
+#include "dlna_controller.h"
 #include "service_config.h"
 
 enum class ServiceStatus { kUnconfigured, kOk, kConnected = kOk, kAuthError, kNetworkError };
@@ -51,6 +52,7 @@ struct MusicTrack {
     std::string artist = "Synthwave · 128kbps";
     std::string source = "LOCAL";
     uint32_t duration_sec = 180;
+    std::string stream_url = "";  // 局域网第三方设备直链 (format=raw)
 };
 
 #if CONFIG_WS185C_ENABLE_BESZEL
@@ -108,6 +110,20 @@ public:
     void OnPlayerPlayPauseClicked();
     void OnPlayerPrevClicked();
     void OnPlayerNextClicked();
+
+    // 直链获取与 DLNA 设备控制
+    std::string GetCurrentTrackDirectUrl(bool for_dlna = true);
+    std::string GetTrackDirectUrl(size_t track_idx, bool for_dlna = true);
+    void SwitchPlaybackTarget(int target_idx);
+    void ScanDlnaDevices();
+    std::vector<waveshare185c::DlnaDevice> GetDlnaDevices() const;
+    int GetCurrentPlaybackTarget() const;
+    std::string GetCurrentPlaybackTargetName() const;
+
+    // 投播弹窗控制
+    void ShowCastModal();
+    void HideCastModal();
+    void UpdateCastModalDeviceList();
 #endif
 
 #if CONFIG_WS185C_ENABLE_BESZEL
@@ -251,6 +267,12 @@ private:
     size_t current_track_idx_ = 0;
     bool is_playing_ = false;
     uint32_t play_elapsed_sec_ = 0;
+
+    // 投播 UI 元素
+    lv_obj_t* player_cast_btn_ = nullptr;
+    lv_obj_t* player_cast_label_ = nullptr;
+    lv_obj_t* cast_modal_ = nullptr;
+    lv_obj_t* cast_list_cont_ = nullptr;
 #else
     inline void SetPlayerAnimationActive(bool /*active*/) {}
 #endif

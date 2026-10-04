@@ -66,6 +66,13 @@ public:
     // 脱敏 URL（用于日志安全输出，隐藏 &p= 或 ?p= 后的密码）
     static std::string RedactUrl(const std::string& url);
 
+    // 生成 Navidrome 音频流直链 URL（for_dlna 为 true 时生成 format=raw 原生直链，供局域网第三方设备播放）
+    static std::string GenerateNavidromeDirectUrl(const std::string& base_url,
+                                                  const std::string& song_id,
+                                                  const std::string& username,
+                                                  const std::string& password,
+                                                  bool for_dlna = true);
+
     // 设置编译期默认值（回退底色）
     void SetKconfigDefaults(const NavidromeConfig& navi, const BeszelConfig& bsz);
 

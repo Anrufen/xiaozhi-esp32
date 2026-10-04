@@ -606,6 +606,97 @@ private:
                                display_->FetchNavidromePlaylist();
                                return true;
                            });
+
+        mcp_server.AddTool(
+            "self.music.get_stream_url",
+            "获取当前 Navidrome 歌曲可供局域网第三方设备（电视、小米音响等）播放的原生直链 URL",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string url = display_->GetCurrentTrackDirectUrl(true);
+                if (url.empty()) {
+                    return std::string("{\"error\": \"No music loaded or Navidrome not configured\"}");
+                }
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "stream_url", url.c_str());
+                cJSON_AddStringToObject(root, "target_device", display_->GetCurrentPlaybackTargetName().c_str());
+                char* printed = cJSON_PrintUnformatted(root);
+                std::string res = printed ? printed : "";
+                cJSON_free(printed);
+                cJSON_Delete(root);
+                return res;
+            });
+
+        mcp_server.AddTool(
+            "self.dlna.list_devices",
+            "列出局域网内发现的所有 DLNA 播放设备（小米电视、小爱音箱等）以及当前投播目标",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                auto devs = display_->GetDlnaDevices();
+                int cur_target = display_->GetCurrentPlaybackTarget();
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddNumberToObject(root, "current_target_index", cur_target);
+                cJSON_AddStringToObject(root, "current_target_name", display_->GetCurrentPlaybackTargetName().c_str());
+                cJSON* arr = cJSON_AddArrayToObject(root, "devices");
+                for (size_t i = 0; i < devs.size(); ++i) {
+                    cJSON* item = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(item, "index", (int)i);
+                    cJSON_AddStringToObject(item, "name", devs[i].name.c_str());
+                    cJSON_AddStringToObject(item, "control_url", devs[i].control_url.c_str());
+                    cJSON_AddItemToArray(arr, item);
+                }
+                char* printed = cJSON_PrintUnformatted(root);
+                std::string res = printed ? printed : "";
+                cJSON_free(printed);
+                cJSON_Delete(root);
+                return res;
+            });
+
+        mcp_server.AddTool(
+            "self.dlna.scan",
+            "主动触发一次局域网 DLNA 媒体设备（电视/音响）后台扫描",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                display_->ScanDlnaDevices();
+                return std::string("DLNA device discovery started in background");
+            });
+
+        mcp_server.AddTool(
+            "self.dlna.cast",
+            "将音乐推送到局域网指定 DLNA 设备（如‘电视’、‘音箱’或设备名称/索引），或者切回‘local’本机扬声器",
+            PropertyList({Property("target", kPropertyTypeString, std::string(""))}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string target = properties["target"].value<std::string>();
+                if (target.empty() || target == "local" || target == "本地" || target == "-1") {
+                    display_->SwitchPlaybackTarget(-1);
+                    return std::string("Playback switched to local speaker");
+                }
+
+                auto devs = display_->GetDlnaDevices();
+                if (devs.empty()) {
+                    display_->ScanDlnaDevices();
+                    return std::string("No DLNA devices found yet. Scanning started, please try again in a few seconds.");
+                }
+
+                char* endptr = nullptr;
+                long idx = strtol(target.c_str(), &endptr, 10);
+                if (endptr && *endptr == '\0' && idx >= 0 && idx < (long)devs.size()) {
+                    display_->SwitchPlaybackTarget((int)idx);
+                    return std::string("Playback switched to: " + devs[idx].name);
+                }
+
+                for (size_t i = 0; i < devs.size(); ++i) {
+                    if (devs[i].name.find(target) != std::string::npos) {
+                        display_->SwitchPlaybackTarget((int)i);
+                        return std::string("Playback switched to: " + devs[i].name);
+                    }
+                }
+
+                std::string msg = "Target '" + target + "' not found. Available devices: [Local Speaker]";
+                for (size_t i = 0; i < devs.size(); ++i) {
+                    msg += ", [" + std::to_string(i) + "] " + devs[i].name;
+                }
+                return msg;
+            });
 #endif
 
 #if CONFIG_WS185C_ENABLE_BESZEL

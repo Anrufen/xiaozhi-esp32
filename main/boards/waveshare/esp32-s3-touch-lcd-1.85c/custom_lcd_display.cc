@@ -5,6 +5,7 @@
 #include "audio/demuxer/ogg_demuxer.h"
 #include "board.h"
 #include "config.h"
+#include "dlna_controller.h"
 #include "lvgl_theme.h"
 #include "player_icons.h"
 #include "wifi_manager.h"
@@ -2312,6 +2313,30 @@ void CustomLcdDisplay::EnsurePlayerUI() {
     lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0x38BDF8), 0);
     lv_obj_align(player_header_label_, LV_ALIGN_TOP_MID, 0, 20);
 
+    // 2.2 顶部投播 (Cast) 入口胶囊按键 (右上角)
+    player_cast_btn_ = lv_btn_create(player_overlay_);
+    lv_obj_set_size(player_cast_btn_, 50, 24);
+    lv_obj_set_style_radius(player_cast_btn_, 12, 0);
+    lv_obj_set_style_bg_color(player_cast_btn_, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_color(player_cast_btn_, lv_color_hex(0x00E5FF), 0);
+    lv_obj_set_style_border_width(player_cast_btn_, 1, 0);
+    lv_obj_set_style_pad_all(player_cast_btn_, 0, 0);
+    lv_obj_align(player_cast_btn_, LV_ALIGN_TOP_RIGHT, -16, 14);
+
+    player_cast_label_ = lv_label_create(player_cast_btn_);
+    lv_obj_set_style_text_color(player_cast_label_, lv_color_hex(0x38BDF8), 0);
+    lv_label_set_text(player_cast_label_, "CAST");
+    lv_obj_set_style_text_font(player_cast_label_, &font_maison_neue_book_14, 0);
+    lv_obj_align(player_cast_label_, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_add_event_cb(
+        player_cast_btn_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->ShowCastModal();
+        },
+        LV_EVENT_CLICKED, this);
+
     // 3. 中间黑胶唱片与环形进度条区 (y: 44, w: 172, h: 172)
     lv_obj_t* disc_box = lv_obj_create(player_overlay_);
     lv_obj_set_size(disc_box, 172, 172);
@@ -2524,11 +2549,35 @@ void CustomLcdDisplay::UpdatePlayerUI() {
 
     const auto& track = playlist_[current_track_idx_];
 
-    char hdr_buf[48];
-    snprintf(hdr_buf, sizeof(hdr_buf), "♪ 0%d/0%d · %s", (int)(current_track_idx_ + 1),
-             (int)playlist_.size(), track.source.c_str());
+    char hdr_buf[64];
+    int target_idx = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
+    if (target_idx >= 0) {
+        std::string dev_name = waveshare185c::DlnaController::GetInstance().GetTargetName();
+        if (dev_name.size() > 16) {
+            dev_name = dev_name.substr(0, 16) + "..";
+        }
+        snprintf(hdr_buf, sizeof(hdr_buf), "♪ 0%d/0%d · 投播: %s", (int)(current_track_idx_ + 1),
+                 (int)playlist_.size(), dev_name.c_str());
+    } else {
+        snprintf(hdr_buf, sizeof(hdr_buf), "♪ 0%d/0%d · %s", (int)(current_track_idx_ + 1),
+                 (int)playlist_.size(), track.source.c_str());
+    }
     if (player_header_label_) {
         lv_label_set_text(player_header_label_, hdr_buf);
+    }
+
+    if (player_cast_btn_ && player_cast_label_) {
+        if (target_idx >= 0) {
+            lv_obj_set_style_bg_color(player_cast_btn_, lv_color_hex(0x0284C7), 0);
+            lv_obj_set_style_border_color(player_cast_btn_, lv_color_hex(0x38BDF8), 0);
+            lv_obj_set_style_text_color(player_cast_label_, lv_color_hex(0xFFFFFF), 0);
+            lv_label_set_text(player_cast_label_, "DLNA");
+        } else {
+            lv_obj_set_style_bg_color(player_cast_btn_, lv_color_hex(0x1E293B), 0);
+            lv_obj_set_style_border_color(player_cast_btn_, lv_color_hex(0x00E5FF), 0);
+            lv_obj_set_style_text_color(player_cast_label_, lv_color_hex(0x38BDF8), 0);
+            lv_label_set_text(player_cast_label_, "CAST");
+        }
     }
 
     if (player_title_label_) {
@@ -2614,6 +2663,16 @@ void CustomLcdDisplay::UpdatePlayerAnimation() {
 }
 
 void CustomLcdDisplay::StopNavidromeStream() {
+    int target_idx = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
+    if (target_idx >= 0) {
+        xTaskCreate(
+            [](void* param) {
+                int t_idx = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
+                waveshare185c::DlnaController::GetInstance().Pause(t_idx);
+                vTaskDelete(NULL);
+            },
+            "dlna_pause", 3072, NULL, 3, NULL);
+    }
     stream_stop_requested_ = true;
     current_playback_id_++;
     SetPlayerAnimationActive(false);
@@ -2634,6 +2693,37 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
     const auto& track = playlist_[track_idx];
     if (track.id.empty()) {
         ESP_LOGW(TAG, "Track id is empty, cannot stream from Navidrome");
+        return;
+    }
+
+    int target_idx = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
+    if (target_idx >= 0) {
+        // DLNA 模式：向电视/小米音响推流原生直链
+        xTaskCreate(
+            [](void* param) {
+                auto self = static_cast<CustomLcdDisplay*>(param);
+                int t_idx = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
+                if (t_idx >= 0 && self->current_track_idx_ < self->playlist_.size()) {
+                    const auto& t = self->playlist_[self->current_track_idx_];
+                    std::string stream = t.stream_url;
+                    if (stream.empty()) {
+                        stream = waveshare185c::ServiceConfig::GenerateNavidromeDirectUrl(
+                            self->navidrome_server_, t.id, self->navidrome_user_,
+                            self->navidrome_pass_, true);
+                    }
+                    ESP_LOGI(TAG, "DLNA Cast to device %d: %s (url: %s)", t_idx,
+                             t.title.c_str(),
+                             waveshare185c::ServiceConfig::RedactUrl(stream).c_str());
+                    waveshare185c::DlnaController::GetInstance().Play(t_idx, stream, t.title,
+                                                                      t.artist);
+                }
+                vTaskDelete(NULL);
+            },
+            "dlna_cast", 4096, this, 3, NULL);
+
+        is_playing_ = true;
+        SetPlayerAnimationActive(true);
+        UpdatePlayerUI();
         return;
     }
 
@@ -2800,6 +2890,240 @@ void CustomLcdDisplay::OnPlayerNextClicked() {
         StartNavidromeStream(current_track_idx_);
     }
     UpdatePlayerUI();
+}
+
+void CustomLcdDisplay::ShowCastModal() {
+    if (cast_modal_) {
+        HideCastModal();
+    }
+
+    cast_modal_ = lv_obj_create(player_overlay_);
+    lv_obj_set_size(cast_modal_, 300, 270);
+    lv_obj_align(cast_modal_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(cast_modal_, lv_color_hex(0x0B0F19), 0);
+    lv_obj_set_style_bg_opa(cast_modal_, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(cast_modal_, lv_color_hex(0x00E5FF), 0);
+    lv_obj_set_style_border_width(cast_modal_, 1, 0);
+    lv_obj_set_style_radius(cast_modal_, 16, 0);
+    lv_obj_set_style_pad_all(cast_modal_, 10, 0);
+    lv_obj_remove_flag(cast_modal_, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 模态框顶部：标题与关闭按钮
+    lv_obj_t* title = lv_label_create(cast_modal_);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(title, GetMainTextFont16(), 0);
+    lv_label_set_text(title, "播放设备选择 (Cast)");
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 6, 6);
+
+    lv_obj_t* close_btn = lv_btn_create(cast_modal_);
+    lv_obj_set_size(close_btn, 28, 28);
+    lv_obj_set_style_radius(close_btn, 14, 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_width(close_btn, 0, 0);
+    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -4, 0);
+    lv_obj_t* close_lbl = lv_label_create(close_btn);
+    lv_label_set_text(close_lbl, "✕");
+    lv_obj_set_style_text_color(close_lbl, lv_color_hex(0x94A3B8), 0);
+    lv_obj_align(close_lbl, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_event_cb(
+        close_btn,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->HideCastModal();
+        },
+        LV_EVENT_CLICKED, this);
+
+    // 中间设备列表滚动容器
+    cast_list_cont_ = lv_obj_create(cast_modal_);
+    lv_obj_set_size(cast_list_cont_, 276, 168);
+    lv_obj_align(cast_list_cont_, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_set_style_bg_opa(cast_list_cont_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cast_list_cont_, 0, 0);
+    lv_obj_set_style_pad_all(cast_list_cont_, 0, 0);
+    lv_obj_set_flex_flow(cast_list_cont_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cast_list_cont_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(cast_list_cont_, 6, 0);
+
+    // 底部“扫描局域网设备”按钮
+    lv_obj_t* refresh_btn = lv_btn_create(cast_modal_);
+    lv_obj_set_size(refresh_btn, 130, 30);
+    lv_obj_set_style_radius(refresh_btn, 15, 0);
+    lv_obj_set_style_bg_color(refresh_btn, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_color(refresh_btn, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_border_width(refresh_btn, 1, 0);
+    lv_obj_align(refresh_btn, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_t* ref_lbl = lv_label_create(refresh_btn);
+    lv_obj_set_style_text_font(ref_lbl, GetMainTextFont16(), 0);
+    lv_obj_set_style_text_color(ref_lbl, lv_color_hex(0x38BDF8), 0);
+    lv_label_set_text(ref_lbl, "扫描局域网设备");
+    lv_obj_align(ref_lbl, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_add_event_cb(
+        refresh_btn,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->ScanDlnaDevices();
+        },
+        LV_EVENT_CLICKED, this);
+
+    UpdateCastModalDeviceList();
+
+    // 自动触发一次局域网设备扫描
+    ScanDlnaDevices();
+}
+
+void CustomLcdDisplay::HideCastModal() {
+    if (cast_modal_) {
+        lv_obj_del(cast_modal_);
+        cast_modal_ = nullptr;
+        cast_list_cont_ = nullptr;
+    }
+}
+
+void CustomLcdDisplay::UpdateCastModalDeviceList() {
+    if (!cast_list_cont_) {
+        return;
+    }
+
+    lv_obj_clean(cast_list_cont_);
+
+    int current_target = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
+    auto devices = waveshare185c::DlnaController::GetInstance().GetDevices();
+
+    // 1. 本地扬声器选项 (target_idx = -1)
+    lv_obj_t* local_btn = lv_btn_create(cast_list_cont_);
+    lv_obj_set_size(local_btn, 260, 36);
+    lv_obj_set_style_radius(local_btn, 8, 0);
+    if (current_target == -1) {
+        lv_obj_set_style_bg_color(local_btn, lv_color_hex(0x0284C7), 0);
+        lv_obj_set_style_border_color(local_btn, lv_color_hex(0x38BDF8), 0);
+        lv_obj_set_style_border_width(local_btn, 1, 0);
+    } else {
+        lv_obj_set_style_bg_color(local_btn, lv_color_hex(0x1E293B), 0);
+        lv_obj_set_style_border_width(local_btn, 0, 0);
+    }
+    lv_obj_t* local_lbl = lv_label_create(local_btn);
+    lv_obj_set_style_text_font(local_lbl, GetMainTextFont16(), 0);
+    lv_obj_set_style_text_color(local_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(local_lbl, current_target == -1 ? "✓ 本机扬声器 (当前)" : "  本机扬声器");
+    lv_obj_align(local_lbl, LV_ALIGN_LEFT_MID, 10, 0);
+
+    lv_obj_add_event_cb(
+        local_btn,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->SwitchPlaybackTarget(-1);
+            self->HideCastModal();
+        },
+        LV_EVENT_CLICKED, this);
+
+    // 2. 局域网各 DLNA 设备
+    for (size_t i = 0; i < devices.size(); ++i) {
+        lv_obj_t* dev_btn = lv_btn_create(cast_list_cont_);
+        lv_obj_set_size(dev_btn, 260, 36);
+        lv_obj_set_style_radius(dev_btn, 8, 0);
+        if (current_target == (int)i) {
+            lv_obj_set_style_bg_color(dev_btn, lv_color_hex(0x0284C7), 0);
+            lv_obj_set_style_border_color(dev_btn, lv_color_hex(0x38BDF8), 0);
+            lv_obj_set_style_border_width(dev_btn, 1, 0);
+        } else {
+            lv_obj_set_style_bg_color(dev_btn, lv_color_hex(0x1E293B), 0);
+            lv_obj_set_style_border_width(dev_btn, 0, 0);
+        }
+
+        lv_obj_t* dev_lbl = lv_label_create(dev_btn);
+        lv_obj_set_style_text_font(dev_lbl, GetMainTextFont16(), 0);
+        lv_obj_set_style_text_color(dev_lbl, lv_color_hex(0xFFFFFF), 0);
+
+        std::string label_text = (current_target == (int)i ? "✓ " : "  ") + devices[i].name;
+        if (label_text.size() > 24) {
+            label_text = label_text.substr(0, 24) + "..";
+        }
+        lv_label_set_text(dev_lbl, label_text.c_str());
+        lv_obj_align(dev_lbl, LV_ALIGN_LEFT_MID, 10, 0);
+
+        lv_obj_set_user_data(dev_btn, (void*)(intptr_t)i);
+        lv_obj_add_event_cb(
+            dev_btn,
+            [](lv_event_t* e) {
+                auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+                lv_obj_t* btn = (lv_obj_t*)lv_event_get_target(e);
+                int dev_idx = (int)(intptr_t)lv_obj_get_user_data(btn);
+                self->SwitchPlaybackTarget(dev_idx);
+                self->HideCastModal();
+            },
+            LV_EVENT_CLICKED, this);
+    }
+
+    if (devices.empty()) {
+        lv_obj_t* hint = lv_label_create(cast_list_cont_);
+        lv_obj_set_style_text_font(hint, GetMainTextFont16(), 0);
+        lv_obj_set_style_text_color(hint, lv_color_hex(0x64748B), 0);
+        lv_label_set_text(hint, "正在探测局域网设备...");
+    }
+}
+
+void CustomLcdDisplay::SwitchPlaybackTarget(int target_idx) {
+    int old_target = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
+    if (old_target == target_idx) {
+        return;
+    }
+
+    waveshare185c::DlnaController::GetInstance().SetTargetIndex(target_idx);
+    ESP_LOGI(TAG, "Switched playback target from %d to %d", old_target, target_idx);
+
+    if (is_playing_) {
+        if (target_idx >= 0) {
+            // 从本地或另一个设备切换到 DLNA 设备
+            StopNavidromeStream();
+            StartNavidromeStream(current_track_idx_);
+        } else {
+            // 切回本地扬声器播放
+            waveshare185c::DlnaController::GetInstance().Stop(old_target);
+            StartNavidromeStream(current_track_idx_);
+        }
+    }
+
+    UpdatePlayerUI();
+}
+
+std::string CustomLcdDisplay::GetCurrentTrackDirectUrl(bool for_dlna) {
+    return GetTrackDirectUrl(current_track_idx_, for_dlna);
+}
+
+std::string CustomLcdDisplay::GetTrackDirectUrl(size_t track_idx, bool for_dlna) {
+    if (playlist_.empty() || track_idx >= playlist_.size()) {
+        return "";
+    }
+    const auto& track = playlist_[track_idx];
+    if (for_dlna && !track.stream_url.empty()) {
+        return track.stream_url;
+    }
+    return waveshare185c::ServiceConfig::GenerateNavidromeDirectUrl(
+        navidrome_server_, track.id, navidrome_user_, navidrome_pass_, for_dlna);
+}
+
+void CustomLcdDisplay::ScanDlnaDevices() {
+    waveshare185c::DlnaController::GetInstance().StartDiscovery(
+        [this](const std::vector<waveshare185c::DlnaDevice>&) {
+            if (this->cast_modal_ && this->cast_list_cont_) {
+                this->UpdateCastModalDeviceList();
+            }
+            this->UpdatePlayerUI();
+        });
+}
+
+std::vector<waveshare185c::DlnaDevice> CustomLcdDisplay::GetDlnaDevices() const {
+    return waveshare185c::DlnaController::GetInstance().GetDevices();
+}
+
+int CustomLcdDisplay::GetCurrentPlaybackTarget() const {
+    return waveshare185c::DlnaController::GetInstance().GetTargetIndex();
+}
+
+std::string CustomLcdDisplay::GetCurrentPlaybackTargetName() const {
+    return waveshare185c::DlnaController::GetInstance().GetTargetName();
 }
 #endif
 
@@ -3322,6 +3646,8 @@ void CustomLcdDisplay::FetchNavidromePlaylist() {
                                                 if (duration)
                                                     t.duration_sec = duration->valueint;
                                                 t.source = "NAVIDROME";
+                                                t.stream_url = waveshare185c::ServiceConfig::GenerateNavidromeDirectUrl(
+                                                    self->navidrome_server_, t.id, self->navidrome_user_, self->navidrome_pass_, true);
                                                 new_list.push_back(std::move(t));
                                             }
                                             if (!new_list.empty()) {
