@@ -15,9 +15,12 @@
 #include <cJSON.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <random>
+#include <set>
 #include <vector>
 
 #define TAG "CustomLcdDisplay"
@@ -38,23 +41,26 @@ static const lv_point_precise_t kSparklinePoints[] = {{0, 20},   {36, 17}, {74, 
 
 // 流式文本清洗：过滤前后空白并智能去重、规范化连续逗号标点
 static std::string SanitizeDisplayText(const std::string& input) {
-    if (input.empty()) return "";
+    if (input.empty())
+        return "";
     std::string out;
     out.reserve(input.size());
 
     // 1. 去除首尾空白字符
     size_t start = 0;
-    while (start < input.size() && (input[start] == ' ' || input[start] == '\t' || input[start] == '\r' || input[start] == '\n')) {
+    while (start < input.size() && (input[start] == ' ' || input[start] == '\t' ||
+                                    input[start] == '\r' || input[start] == '\n')) {
         start++;
     }
     size_t end = input.size();
-    while (end > start && (input[end - 1] == ' ' || input[end - 1] == '\t' || input[end - 1] == '\r' || input[end - 1] == '\n')) {
+    while (end > start && (input[end - 1] == ' ' || input[end - 1] == '\t' ||
+                           input[end - 1] == '\r' || input[end - 1] == '\n')) {
         end--;
     }
 
     // 2. 清洗连续逗号 (英文逗号 ',' 或 中文全角逗号 '，' 对应的 UTF-8: EF BC 8C)
     bool prev_is_comma = false;
-    for (size_t i = start; i < end; ) {
+    for (size_t i = start; i < end;) {
         unsigned char c = (unsigned char)input[i];
         if (c == ',') {
             if (!prev_is_comma) {
@@ -62,7 +68,8 @@ static std::string SanitizeDisplayText(const std::string& input) {
                 prev_is_comma = true;
             }
             i++;
-        } else if (i + 2 < end && (unsigned char)input[i] == 0xEF && (unsigned char)input[i+1] == 0xBC && (unsigned char)input[i+2] == 0x8C) {
+        } else if (i + 2 < end && (unsigned char)input[i] == 0xEF &&
+                   (unsigned char)input[i + 1] == 0xBC && (unsigned char)input[i + 2] == 0x8C) {
             if (!prev_is_comma) {
                 out.append(input, i, 3);
                 prev_is_comma = true;
@@ -377,7 +384,8 @@ void CustomLcdDisplay::SetEmotion(const char* emotion) {
 const lv_font_t* CustomLcdDisplay::GetMainTextFont16() {
     if (current_theme_ && current_theme_->GetTextFont()) {
         auto* f = current_theme_->GetTextFont()->font();
-        if (f) return f;
+        if (f)
+            return f;
     }
     return &font_noto_sans_basic_16_4;
 }
@@ -544,7 +552,7 @@ void CustomLcdDisplay::SetupWakeupOverlay() {
     lv_obj_set_style_border_width(wakeup_text_container_, 0, 0);
     lv_obj_set_style_pad_all(wakeup_text_container_, 0, 0);
     lv_obj_set_scrollbar_mode(wakeup_text_container_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_flag(wakeup_text_container_, LV_OBJ_FLAG_HIDDEN); // 初始隐藏
+    lv_obj_add_flag(wakeup_text_container_, LV_OBJ_FLAG_HIDDEN);  // 初始隐藏
 
     wakeup_text_label_ = lv_label_create(wakeup_text_container_);
     lv_obj_set_width(wakeup_text_label_, 280);
@@ -619,7 +627,8 @@ void CustomLcdDisplay::HideWakeupOverlay() {
 }
 
 void CustomLcdDisplay::SetupWifiConfigOverlay() {
-    if (wifi_config_overlay_) return;
+    if (wifi_config_overlay_)
+        return;
 
     wifi_config_overlay_ = lv_obj_create(lv_layer_top());
     lv_obj_set_size(wifi_config_overlay_, 360, 360);
@@ -707,7 +716,7 @@ void CustomLcdDisplay::SetupWifiConfigOverlay() {
     lv_obj_set_style_text_color(wifi_config_code_val_, lv_color_hex(0x4EDEA3), 0);
     lv_label_set_text(wifi_config_code_val_, "配对码: ------");
     lv_obj_align(wifi_config_code_val_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_flag(wifi_config_code_box_, LV_OBJ_FLAG_HIDDEN); // 默认隐藏
+    lv_obj_add_flag(wifi_config_code_box_, LV_OBJ_FLAG_HIDDEN);  // 默认隐藏
 
     // 3. 底部提示
     lv_obj_t* foot_lbl = lv_label_create(wifi_config_overlay_);
@@ -719,7 +728,8 @@ void CustomLcdDisplay::SetupWifiConfigOverlay() {
     lv_obj_add_flag(wifi_config_overlay_, LV_OBJ_FLAG_HIDDEN);
 }
 
-void CustomLcdDisplay::ShowWifiConfigOverlay(const std::string& ssid, const std::string& url, const std::string& code) {
+void CustomLcdDisplay::ShowWifiConfigOverlay(const std::string& ssid, const std::string& url,
+                                             const std::string& code) {
     DisplayLockGuard lock(this);
     if (!wifi_config_overlay_) {
         SetupWifiConfigOverlay();
@@ -766,7 +776,8 @@ void CustomLcdDisplay::UpdateWakeupVuAnimation() {
 
     // 虚拟发光 LED 双眼微动效 (极其轻量化)
     if (led_eye_left_ && led_eye_right_) {
-        bool is_speaking = (wakeup_text_container_ && !lv_obj_has_flag(wakeup_text_container_, LV_OBJ_FLAG_HIDDEN));
+        bool is_speaking = (wakeup_text_container_ &&
+                            !lv_obj_has_flag(wakeup_text_container_, LV_OBJ_FLAG_HIDDEN));
         if (is_speaking) {
             // 播报时：双眼随着语音节奏在 24 ~ 36px 之间自然跃动
             int eye_h = (int)(30.0f + sinf(phase * 2.2f) * 5.0f);
@@ -794,11 +805,14 @@ void CustomLcdDisplay::UpdateWakeupVuAnimation() {
 
     float base = sinf(phase) * 0.4f + 0.6f;
     for (int i = 0; i < 10; ++i) {
-        if (!wakeup_vu_bars_[i]) continue;
+        if (!wakeup_vu_bars_[i])
+            continue;
         float noise = sinf(phase * 2.0f + i * 0.8f) * 0.5f + 0.5f;
         int h = (int)(noise * base * 16.0f);
-        if (h < 4) h = 4;
-        if (h > 20) h = 20;
+        if (h < 4)
+            h = 4;
+        if (h > 20)
+            h = 20;
 
         lv_obj_set_height(wakeup_vu_bars_[i], h);
         lv_obj_set_y(wakeup_vu_bars_[i], 32 - h);
@@ -879,19 +893,23 @@ void CustomLcdDisplay::SetStatus(const char* status) {
         HideWifiConfigOverlay();
     }
 
+    // 关键修复：仅在真正进入语音拾音或连接状态时才停止音乐，严禁将时间刷新字符串（如"21:55"）误判为活跃状态！
+    bool is_voice_wake = (s == Lang::Strings::LISTENING || s == Lang::Strings::CONNECTING ||
+                          s.find("正在聆听") != std::string::npos || s.find("Listening") != std::string::npos ||
+                          s.find("连接中") != std::string::npos || s.find("Connecting") != std::string::npos);
+    if (is_voice_wake) {
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+        if (is_playing_) {
+            ESP_LOGI(TAG, "Voice assistant awakened [%s], auto-stopping music stream", status);
+            StopNavidromeStream();
+        }
+#endif
+    }
+
     if (s == Lang::Strings::LISTENING || s.find("Listening") != std::string::npos ||
         s.find("正在聆听") != std::string::npos) {
         HideWifiConfigOverlay();
         ShowWakeupOverlay();
-#if CONFIG_WS185C_ENABLE_NAVIDROME
-        // 唤醒检测：若当前正在播放音乐，立即停止/暂停音乐推流与解码，确保麦克风安静拾音
-        if (is_playing_) {
-            ESP_LOGI(TAG, "Voice assistant awakened, auto-pausing music playback");
-            StopNavidromeStream();
-            is_playing_ = false;
-            UpdatePlayerUI();
-        }
-#endif
         is_new_assistant_turn_ = true;
         voice_input_detected_ = false;
 
@@ -1007,10 +1025,12 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
 
     if (r == "system") {
         if (!text.empty()) {
-            if (text.find("192.168.") != std::string::npos || text.find("Xiaozhi") != std::string::npos ||
+            if (text.find("192.168.") != std::string::npos ||
+                text.find("Xiaozhi") != std::string::npos ||
                 text.find("热点") != std::string::npos || text.find("http") != std::string::npos) {
                 ShowWifiConfigOverlay("", "", "");
-            } else if (text.find("验证码") != std::string::npos || text.find("激活码") != std::string::npos ||
+            } else if (text.find("验证码") != std::string::npos ||
+                       text.find("激活码") != std::string::npos ||
                        text.find("Code") != std::string::npos) {
                 ShowWifiConfigOverlay("", "", text);
             }
@@ -1097,12 +1117,12 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
 
         if (wakeup_text_label_) {
             lv_label_set_text(wakeup_text_label_, assistant_stream_text_.c_str());
-            // 自动向下滚动，保证最新句段呈现在视野中
+            // 自动向下滚动，保证最新句段呈现在视野中（使用 LV_ANIM_OFF 消除动画对音频解码与 SPI 总线的抢占）
             lv_obj_update_layout(wakeup_text_label_);
             lv_coord_t label_h = lv_obj_get_height(wakeup_text_label_);
             lv_coord_t cont_h = lv_obj_get_height(wakeup_text_container_);
             if (label_h > cont_h) {
-                lv_obj_scroll_to_y(wakeup_text_container_, label_h - cont_h, LV_ANIM_ON);
+                lv_obj_scroll_to_y(wakeup_text_container_, label_h - cont_h, LV_ANIM_OFF);
             }
         }
     }
@@ -1368,6 +1388,19 @@ void CustomLcdDisplay::UpdateHomeClock() {
     if (in_config || !home_time_label_)
         return;
 
+    bool is_busy = (state != kDeviceStateIdle);
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        is_busy = true;
+    }
+#endif
+
+    // 如果处于对话中（listening/speaking/connecting 等）或正在播放音乐：
+    // 全面冻结底层的 UI 刷新、轮播和数据拉取，把全部 CPU/网络资源让渡给音频流！
+    if (is_busy) {
+        return;
+    }
+
     time_t now = time(NULL);
     struct tm* tm_now = localtime(&now);
 
@@ -1425,6 +1458,13 @@ void CustomLcdDisplay::CheckAndTriggerStockFetch() {
         return;
     }
 
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        idle_start_sec_ = 0;
+        return;
+    }
+#endif
+
     int64_t now_sec = esp_timer_get_time() / 1000000;
     if (idle_start_sec_ == 0) {
         idle_start_sec_ = now_sec;
@@ -1460,9 +1500,14 @@ void CustomLcdDisplay::CheckAndTriggerStockFetch() {
 void CustomLcdDisplay::FetchStockData() {
     auto& app = Application::GetInstance();
     auto state = app.GetDeviceState();
-    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+    if (state != kDeviceStateIdle) {
         return;
     }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        return;
+    }
+#endif
 
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
@@ -1486,6 +1531,15 @@ void CustomLcdDisplay::FetchStockData() {
         }
         http->Close();
     }
+
+    if (app.GetDeviceState() != kDeviceStateIdle) {
+        return;
+    }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        return;
+    }
+#endif
 
     if (success && !body.empty()) {
         ParseAndApplyStock(body);
@@ -2288,12 +2342,12 @@ void CustomLcdDisplay::PrevVpsNode() {
 // ========================================================
 #if CONFIG_WS185C_ENABLE_NAVIDROME
 void CustomLcdDisplay::EnsurePlayerUI() {
+    DisplayLockGuard lock(this);
     if (player_ui_created_)
         return;
     player_ui_created_ = true;
 
-    playlist_.clear();
-    if (service_config_ && service_config_->GetNavidromeConfig().IsConfigured()) {
+    if (playlist_.empty() && service_config_ && service_config_->GetNavidromeConfig().IsConfigured()) {
         FetchNavidromePlaylist();
     }
 
@@ -2319,26 +2373,30 @@ void CustomLcdDisplay::EnsurePlayerUI() {
     };
     lv_obj_add_event_cb(player_overlay_, on_player_gesture, LV_EVENT_GESTURE, this);
 
-    // 2. 顶部微光标题 (y: 20，恢复原版 Navidrome 极客文字排版，无边框遮挡)
+    // 2. 顶部微光标题 (隐藏，顶部彻底留白，不放置内容)
     player_header_label_ = lv_label_create(player_overlay_);
-    lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0x38BDF8), 0);
-    lv_obj_set_style_text_font(player_header_label_, GetMainTextFont16(), 0);
-    lv_label_set_text(player_header_label_, "♪ 本机播放");
-    lv_obj_align(player_header_label_, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_add_flag(player_header_label_, LV_OBJ_FLAG_HIDDEN);
 
-    // 3. 中间黑胶唱片与环形进度条区 (y: 44, w: 172, h: 172)
+    // 3. 中间黑胶唱片与环形进度条区 (y: 30, w: 168, h: 168, 下边缘为 198)
     lv_obj_t* disc_box = lv_obj_create(player_overlay_);
-    lv_obj_set_size(disc_box, 172, 172);
-    lv_obj_align(disc_box, LV_ALIGN_TOP_MID, 0, 44);
+    lv_obj_set_size(disc_box, 168, 168);
+    lv_obj_align(disc_box, LV_ALIGN_TOP_MID, 0, 30);
     lv_obj_set_style_bg_opa(disc_box, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(disc_box, 0, 0);
     lv_obj_set_style_pad_all(disc_box, 0, 0);
     lv_obj_remove_flag(disc_box, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_flag(disc_box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(disc_box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(
+        disc_box,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->OnVinylClicked();
+        },
+        LV_EVENT_CLICKED, this);
 
     // 弧形进度条 (围绕唱片)
     player_arc_ = lv_arc_create(disc_box);
-    lv_obj_set_size(player_arc_, 168, 168);
+    lv_obj_set_size(player_arc_, 164, 164);
     lv_obj_align(player_arc_, LV_ALIGN_CENTER, 0, 0);
     lv_arc_set_rotation(player_arc_, 135);
     lv_arc_set_bg_angles(player_arc_, 0, 270);
@@ -2371,8 +2429,7 @@ void CustomLcdDisplay::EnsurePlayerUI() {
         },
         LV_EVENT_CLICKED, this);
 
-    // 移掉原先正中央的圆环限制，直接在唱片核心舒展大尺寸宽幅律动声谱
-    // 宽 116px, 高 58px，13 根律动跳柱
+    // 宽幅律动声谱 (宽 116px, 高 58px，13 根律动跳柱)
     lv_obj_t* spectrum_box = lv_obj_create(vinyl);
     lv_obj_set_size(spectrum_box, 116, 58);
     lv_obj_align(spectrum_box, LV_ALIGN_CENTER, 0, 0);
@@ -2386,7 +2443,7 @@ void CustomLcdDisplay::EnsurePlayerUI() {
     lv_obj_remove_flag(spectrum_box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(spectrum_box, LV_OBJ_FLAG_CLICKABLE);
 
-    // 13 柱全景音律渐变色彩体系（从青蓝两翼过渡到极光高光中央）
+    // 13 柱全景音律渐变色彩体系
     static const uint32_t kEqColors[kEqBarCount] = {
         0x0284C7, 0x0EA5E9, 0x38BDF8, 0x00E5FF, 0x2DD4BF, 0x34D399, 0x6EE7B7,
         0x34D399, 0x2DD4BF, 0x00E5FF, 0x38BDF8, 0x0EA5E9, 0x0284C7};
@@ -2400,24 +2457,44 @@ void CustomLcdDisplay::EnsurePlayerUI() {
         lv_obj_remove_flag(eq_bars_[i], LV_OBJ_FLAG_CLICKABLE);
     }
 
-    // 4. 曲目名称与艺术家 (继承系统全量中文字库，避免被精简字体截断字模)
+    // 4. 专属播放设备说明栏 (y: 204, 位于同心圆下方、歌曲名称上方，宽度 280 完整展示设备名)
+    // 触控交互：点击设备说明栏直接切换设备，与点击黑胶唱片一致
+    player_device_label_ = lv_label_create(player_overlay_);
+    lv_obj_set_style_text_color(player_device_label_, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_text_font(player_device_label_, GetMainTextFont16(), 0);
+    lv_obj_set_width(player_device_label_, 280);
+    lv_obj_set_style_text_align(player_device_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(player_device_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(player_device_label_, "♪ 01/01 · 本机扬声器");
+    lv_obj_align(player_device_label_, LV_ALIGN_TOP_MID, 0, 204);
+    lv_obj_add_flag(player_device_label_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(
+        player_device_label_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->OnVinylClicked();
+        },
+        LV_EVENT_CLICKED, this);
+
+    // 5. 曲目名称与艺术家 (y: 232 / 256, 继承系统全量中文字库)
     player_title_label_ = lv_label_create(player_overlay_);
     lv_obj_set_style_text_color(player_title_label_, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_width(player_title_label_, 280);
+    lv_obj_set_style_text_font(player_title_label_, GetMainTextFont16(), 0);
     lv_obj_set_style_text_align(player_title_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(player_title_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_align(player_title_label_, LV_ALIGN_TOP_MID, 0, 222);
+    lv_obj_align(player_title_label_, LV_ALIGN_TOP_MID, 0, 232);
 
     player_artist_label_ = lv_label_create(player_overlay_);
     lv_obj_set_style_text_color(player_artist_label_, lv_color_hex(0x94A3B8), 0);
     lv_obj_set_width(player_artist_label_, 260);
     lv_obj_set_style_text_align(player_artist_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(player_artist_label_, LV_LABEL_LONG_DOT);
-    lv_obj_align(player_artist_label_, LV_ALIGN_TOP_MID, 0, 250);
+    lv_obj_align(player_artist_label_, LV_ALIGN_TOP_MID, 0, 256);
 
-    // 5. 底部触控控制栏 (y: 280, 居中排列: Prev, Play, Next)
+    // 6. 底部触控控制栏 (y: 280, 高度 54, 居中排列: Prev, Play, Next)
     lv_obj_t* ctrl_row = lv_obj_create(player_overlay_);
-    lv_obj_set_size(ctrl_row, 240, 56);
+    lv_obj_set_size(ctrl_row, 240, 54);
     lv_obj_align(ctrl_row, LV_ALIGN_TOP_MID, 0, 280);
     lv_obj_set_style_bg_opa(ctrl_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(ctrl_row, 0, 0);
@@ -2504,38 +2581,39 @@ void CustomLcdDisplay::EnsurePlayerUI() {
 }
 
 void CustomLcdDisplay::UpdatePlayerUI() {
+    DisplayLockGuard lock(this);
     if (!player_ui_created_)
         return;
 
     if (playlist_.empty()) {
         if (!service_config_ || !service_config_->GetNavidromeConfig().IsConfigured()) {
-            if (player_header_label_)
-                lv_label_set_text(player_header_label_, "♪ 未配置");
+            if (player_device_label_)
+                lv_label_set_text(player_device_label_, "♪ --/-- · 请配置 Navidrome");
             if (player_title_label_)
-                lv_label_set_text(player_title_label_, "请配置 Navidrome");
+                lv_label_set_text(player_title_label_, "等待服务配置");
             if (player_artist_label_)
                 lv_label_set_text(player_artist_label_, "使用 MCP 或 NVS 设置");
         } else if (navidrome_status_ == ServiceStatus::kAuthError) {
-            if (player_header_label_)
-                lv_label_set_text(player_header_label_, "♪ 认证失败");
+            if (player_device_label_)
+                lv_label_set_text(player_device_label_, "♪ --/-- · 账号或密码错误");
             if (player_title_label_)
-                lv_label_set_text(player_title_label_, "账号或密码错误");
+                lv_label_set_text(player_title_label_, "请检查账号配置");
             if (player_artist_label_)
-                lv_label_set_text(player_artist_label_, "请检查配置");
+                lv_label_set_text(player_artist_label_, "请在设置中修改");
         } else if (navidrome_status_ == ServiceStatus::kNetworkError) {
-            if (player_header_label_)
-                lv_label_set_text(player_header_label_, "♪ 网络不可达");
+            if (player_device_label_)
+                lv_label_set_text(player_device_label_, "♪ --/-- · 无法连接服务器");
             if (player_title_label_)
-                lv_label_set_text(player_title_label_, "无法连接服务器");
+                lv_label_set_text(player_title_label_, "网络不可达");
             if (player_artist_label_)
                 lv_label_set_text(player_artist_label_, "请检查网络或地址");
         } else {
-            if (player_header_label_)
-                lv_label_set_text(player_header_label_, "♪ 无曲目");
+            if (player_device_label_)
+                lv_label_set_text(player_device_label_, "♪ 00/00 · 等待曲目加载...");
             if (player_title_label_)
                 lv_label_set_text(player_title_label_, "曲库暂无音乐");
             if (player_artist_label_)
-                lv_label_set_text(player_artist_label_, "等待拉取...");
+                lv_label_set_text(player_artist_label_, "正在从服务器拉取");
         }
         if (player_time_label_)
             lv_label_set_text(player_time_label_, "--:--");
@@ -2547,25 +2625,36 @@ void CustomLcdDisplay::UpdatePlayerUI() {
 
     const auto& track = playlist_[current_track_idx_];
 
-    char hdr_buf[64];
-    int target_idx = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
-    if (target_idx >= 0) {
-        std::string dev_name = waveshare185c::DlnaController::GetInstance().GetTargetName();
-        if (dev_name.size() > 14) {
-            dev_name = dev_name.substr(0, 14) + "..";
-        }
-        snprintf(hdr_buf, sizeof(hdr_buf), "♪ 0%d/0%d · 投播: %s", (int)(current_track_idx_ + 1),
-                 (int)playlist_.size(), dev_name.c_str());
-    } else {
-        snprintf(hdr_buf, sizeof(hdr_buf), "♪ 0%d/0%d · 本机播放", (int)(current_track_idx_ + 1),
-                 (int)playlist_.size());
-    }
+    // 1. 顶部不再放置内容，彻底隐藏
     if (player_header_label_) {
-        lv_label_set_text(player_header_label_, hdr_buf);
+        lv_obj_add_flag(player_header_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // 2. 专属设备显示栏 (位于同心圆下方、歌曲名称上方，包含 icon 与曲目序号，去掉中括号与
+    // navidrome)
+    auto& dlna = waveshare185c::DlnaController::GetInstance();
+    int target_idx = dlna.GetTargetIndex();
+    bool is_scanning = dlna.IsScanning();
+
+    if (player_device_label_) {
+        char dev_buf[96];
+        char prefix[32];
+        snprintf(prefix, sizeof(prefix), "♪ %02d/%02d · ", (int)(current_track_idx_ + 1),
+                 (int)playlist_.size());
+
         if (target_idx >= 0) {
-            lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0x00E5FF), 0);
+            std::string dev_name = dlna.GetTargetName();
+            snprintf(dev_buf, sizeof(dev_buf), "%s投播: %s", prefix, dev_name.c_str());
+            lv_label_set_text(player_device_label_, dev_buf);
+            lv_obj_set_style_text_color(player_device_label_, lv_color_hex(0x00E5FF), 0);
+        } else if (is_scanning) {
+            snprintf(dev_buf, sizeof(dev_buf), "%s正在搜索设备...", prefix);
+            lv_label_set_text(player_device_label_, dev_buf);
+            lv_obj_set_style_text_color(player_device_label_, lv_color_hex(0xFBBF24), 0);
         } else {
-            lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0x38BDF8), 0);
+            snprintf(dev_buf, sizeof(dev_buf), "%s本机扬声器", prefix);
+            lv_label_set_text(player_device_label_, dev_buf);
+            lv_obj_set_style_text_color(player_device_label_, lv_color_hex(0x38BDF8), 0);
         }
     }
 
@@ -2603,6 +2692,7 @@ void CustomLcdDisplay::UpdatePlayerUI() {
 }
 
 void CustomLcdDisplay::SetPlayerAnimationActive(bool active) {
+    DisplayLockGuard lock(this);
     if (!player_anim_timer_)
         return;
     if (active && is_playing_ && current_page_ == -1) {
@@ -2652,6 +2742,7 @@ void CustomLcdDisplay::UpdatePlayerAnimation() {
 }
 
 void CustomLcdDisplay::StopNavidromeStream() {
+    is_playing_ = false;
     int target_idx = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
     if (target_idx >= 0) {
         xTaskCreate(
@@ -2666,10 +2757,18 @@ void CustomLcdDisplay::StopNavidromeStream() {
     current_playback_id_++;
     SetPlayerAnimationActive(false);
     Application::GetInstance().GetAudioService().ResetDecoder();
+    UpdatePlayerUI();
 }
 
 void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
     StopNavidromeStream();
+
+    // 如果上一个流任务正在退出，等待它清理完成，避免双流并发争抢网络与内存
+    int wait_cycles = 0;
+    while (stream_task_handle_ != nullptr && wait_cycles < 10) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        wait_cycles++;
+    }
 
     if (!service_config_ || !service_config_->GetNavidromeConfig().IsConfigured()) {
         ESP_LOGW(TAG, "Navidrome is unconfigured, cannot stream");
@@ -2700,8 +2799,7 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
                             self->navidrome_server_, t.id, self->navidrome_user_,
                             self->navidrome_pass_, true);
                     }
-                    ESP_LOGI(TAG, "DLNA Cast to device %d: %s (url: %s)", t_idx,
-                             t.title.c_str(),
+                    ESP_LOGI(TAG, "DLNA Cast to device %d: %s (url: %s)", t_idx, t.title.c_str(),
                              waveshare185c::ServiceConfig::RedactUrl(stream).c_str());
                     waveshare185c::DlnaController::GetInstance().Play(t_idx, stream, t.title,
                                                                       t.artist);
@@ -2721,6 +2819,10 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
     current_playback_id_++;
     uint32_t my_playback_id = current_playback_id_;
     (void)my_playback_id;
+
+    is_playing_ = true;
+    SetPlayerAnimationActive(true);
+    UpdatePlayerUI();
 
     xTaskCreate(
         [](void* param) {
@@ -2840,10 +2942,11 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
             }
             vTaskDelete(NULL);
         },
-        "navi_stream", 8192, this, 3, &stream_task_handle_);
+        "navi_stream", 4096, this, 3, &stream_task_handle_);
 }
 
 void CustomLcdDisplay::OnPlayerPlayPauseClicked() {
+    DisplayLockGuard lock(this);
     if (playlist_.empty())
         return;
     is_playing_ = !is_playing_;
@@ -2856,6 +2959,7 @@ void CustomLcdDisplay::OnPlayerPlayPauseClicked() {
 }
 
 void CustomLcdDisplay::OnPlayerPrevClicked() {
+    DisplayLockGuard lock(this);
     if (playlist_.empty())
         return;
     if (current_track_idx_ == 0) {
@@ -2871,6 +2975,7 @@ void CustomLcdDisplay::OnPlayerPrevClicked() {
 }
 
 void CustomLcdDisplay::OnPlayerNextClicked() {
+    DisplayLockGuard lock(this);
     if (playlist_.empty())
         return;
     current_track_idx_ = (current_track_idx_ + 1) % playlist_.size();
@@ -2882,41 +2987,67 @@ void CustomLcdDisplay::OnPlayerNextClicked() {
 }
 
 void CustomLcdDisplay::OnVinylClicked() {
+    DisplayLockGuard lock(this);
     auto& dlna = waveshare185c::DlnaController::GetInstance();
     auto devs = dlna.GetDevices();
     if (devs.empty()) {
         ESP_LOGI(TAG, "Vinyl clicked: no DLNA devices cached, initiating background scan");
         ScanDlnaDevices(true);
-        if (player_header_label_) {
-            lv_label_set_text(player_header_label_, "♪ 正在搜索局域网设备...");
+        if (player_device_label_) {
+            char dev_buf[96];
+            snprintf(dev_buf, sizeof(dev_buf), "♪ %02d/%02d · 正在搜索设备...",
+                     playlist_.empty() ? 1 : (int)(current_track_idx_ + 1),
+                     playlist_.empty() ? 1 : (int)playlist_.size());
+            lv_label_set_text(player_device_label_, dev_buf);
+            lv_obj_set_style_text_color(player_device_label_, lv_color_hex(0xFBBF24), 0);
         }
         return;
     }
 
-    int next_target = dlna.CycleNextTarget();
-    std::string target_name = dlna.GetTargetName();
-    ESP_LOGI(TAG, "Vinyl clicked: switched target to %d (%s)", next_target, target_name.c_str());
+    int next_target = dlna.GetNextTargetIndex();
+    std::string target_name = (next_target >= 0 && next_target < (int)devs.size())
+                                  ? devs[next_target].name
+                                  : "本机扬声器";
+    ESP_LOGI(TAG, "Vinyl clicked: switching target to %d (%s)", next_target, target_name.c_str());
     SwitchPlaybackTarget(next_target);
 }
 
 void CustomLcdDisplay::SwitchPlaybackTarget(int target_idx) {
-    int old_target = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
+    DisplayLockGuard lock(this);
+    auto& dlna = waveshare185c::DlnaController::GetInstance();
+    int old_target = dlna.GetTargetIndex();
     if (old_target == target_idx) {
+        UpdatePlayerUI();
         return;
     }
 
-    waveshare185c::DlnaController::GetInstance().SetTargetIndex(target_idx);
-    ESP_LOGI(TAG, "Switched playback target from %d to %d", old_target, target_idx);
+    dlna.SetTargetIndex(target_idx);
+    ESP_LOGI(TAG, "Switched playback target from %d to %d (playing=%d)", old_target, target_idx,
+             (int)is_playing_);
 
     if (is_playing_) {
         if (target_idx >= 0) {
-            // 从本地或另一个设备切换到 DLNA 设备
+            // 从本地或另一个设备切换到 DLNA 设备：先停本地流，再向 DLNA 投播
             StopNavidromeStream();
             StartNavidromeStream(current_track_idx_);
         } else {
-            // 切回本地扬声器播放
-            waveshare185c::DlnaController::GetInstance().Stop(old_target);
+            // 切回本地扬声器播放：停止旧 DLNA 设备，启动本地流
+            if (old_target >= 0) {
+                waveshare185c::DlnaController::GetInstance().Stop(old_target);
+            }
             StartNavidromeStream(current_track_idx_);
+        }
+    } else {
+        // 关键修复：暂停状态下切换播放设备
+        // 如果旧设备是 DLNA 设备，异步发送 Stop 彻底结束旧设备的播放会话
+        if (old_target >= 0) {
+            xTaskCreate(
+                [](void* param) {
+                    int dev = (int)(intptr_t)param;
+                    waveshare185c::DlnaController::GetInstance().Stop(dev);
+                    vTaskDelete(NULL);
+                },
+                "dlna_stop_old", 3072, (void*)(intptr_t)old_target, 3, NULL);
         }
     }
 
@@ -2941,10 +3072,7 @@ std::string CustomLcdDisplay::GetTrackDirectUrl(size_t track_idx, bool for_dlna)
 
 void CustomLcdDisplay::ScanDlnaDevices(bool force) {
     waveshare185c::DlnaController::GetInstance().StartDiscovery(
-        [this](const std::vector<waveshare185c::DlnaDevice>&) {
-            this->UpdatePlayerUI();
-        },
-        force);
+        [this](const std::vector<waveshare185c::DlnaDevice>&) { this->UpdatePlayerUI(); }, force);
 }
 
 std::vector<waveshare185c::DlnaDevice> CustomLcdDisplay::GetDlnaDevices() const {
@@ -2967,6 +3095,12 @@ void CustomLcdDisplay::CheckAndTriggerWeatherFetch() {
     if (state != kDeviceStateIdle) {
         return;
     }
+
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        return;
+    }
+#endif
 
     int64_t now_sec = esp_timer_get_time() / 1000000;
     if (idle_start_sec_ == 0 || (now_sec - idle_start_sec_ < 25)) {
@@ -2992,15 +3126,20 @@ void CustomLcdDisplay::CheckAndTriggerWeatherFetch() {
             self->weather_fetching_ = false;
             vTaskDelete(NULL);
         },
-        "weather_fetch", 8192, this, 1, nullptr);
+        "weather_fetch", 4096, this, 1, nullptr);
 }
 
 void CustomLcdDisplay::FetchWeatherData() {
     auto& app = Application::GetInstance();
     auto state = app.GetDeviceState();
-    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+    if (state != kDeviceStateIdle) {
         return;
     }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        return;
+    }
+#endif
 
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
@@ -3040,6 +3179,15 @@ void CustomLcdDisplay::FetchWeatherData() {
             http_loc->Close();
         }
     }
+
+    if (app.GetDeviceState() != kDeviceStateIdle) {
+        return;
+    }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        return;
+    }
+#endif
 
     // 2. 根据城市获取天气（成都市默认 citykey: 101270101）
     std::string city_code = "101270101";
@@ -3230,7 +3378,7 @@ void CustomLcdDisplay::EnsureSettingsUI() {
     lv_obj_align(v_title, LV_ALIGN_LEFT_MID, 0, 0);
 
     volume_val_label_ = lv_label_create(v_row);
-    lv_label_set_text(volume_val_label_, "60%");
+    lv_label_set_text(volume_val_label_, "30%");
     lv_obj_set_style_text_font(volume_val_label_, &font_maison_neue_book_14, 0);
     lv_obj_set_style_text_color(volume_val_label_, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(volume_val_label_, LV_ALIGN_RIGHT_MID, 0, 0);
@@ -3240,7 +3388,7 @@ void CustomLcdDisplay::EnsureSettingsUI() {
     lv_obj_set_size(volume_slider_, 240, 22);
     lv_obj_align(volume_slider_, LV_ALIGN_TOP_MID, 0, 154);
     lv_slider_set_range(volume_slider_, 0, 100);
-    lv_slider_set_value(volume_slider_, 60, LV_ANIM_OFF);
+    lv_slider_set_value(volume_slider_, 30, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(volume_slider_, lv_color_hex(0x1E293B), LV_PART_MAIN);
     lv_obj_set_style_radius(volume_slider_, 11, LV_PART_MAIN);
     lv_obj_set_style_bg_color(volume_slider_, lv_color_hex(0xF59E0B), LV_PART_INDICATOR);
@@ -3479,8 +3627,11 @@ void CustomLcdDisplay::FetchNavidromePlaylist() {
                                                 if (duration)
                                                     t.duration_sec = duration->valueint;
                                                 t.source = "NAVIDROME";
-                                                t.stream_url = waveshare185c::ServiceConfig::GenerateNavidromeDirectUrl(
-                                                    self->navidrome_server_, t.id, self->navidrome_user_, self->navidrome_pass_, true);
+                                                t.stream_url = waveshare185c::ServiceConfig::
+                                                    GenerateNavidromeDirectUrl(
+                                                        self->navidrome_server_, t.id,
+                                                        self->navidrome_user_,
+                                                        self->navidrome_pass_, true);
                                                 new_list.push_back(std::move(t));
                                             }
                                             if (!new_list.empty()) {
@@ -3491,9 +3642,13 @@ void CustomLcdDisplay::FetchNavidromePlaylist() {
                                                 Application::GetInstance().Schedule(
                                                     [self,
                                                      new_list = std::move(new_list)]() mutable {
-                                                        self->playlist_ = std::move(new_list);
-                                                        self->current_track_idx_ = 0;
-                                                        self->play_elapsed_sec_ = 0;
+                                                        DisplayLockGuard lock(self);
+                                                        self->default_playlist_ = new_list;
+                                                        if (!self->is_playing_ && !self->is_search_playlist_) {
+                                                            self->playlist_ = std::move(new_list);
+                                                            self->current_track_idx_ = 0;
+                                                            self->play_elapsed_sec_ = 0;
+                                                        }
                                                         self->UpdatePlayerUI();
                                                         self->UpdateSettingsValues();
                                                     });
@@ -3526,6 +3681,294 @@ void CustomLcdDisplay::FetchNavidromePlaylist() {
             vTaskDelete(NULL);
         },
         "navi_fetch", 4096, this, 3, NULL);
+}
+
+// 辅助：轻量 URL 编码
+static std::string UrlEncodeQuery(const std::string& value) {
+    std::ostringstream escaped;
+    escaped.fill('0');
+    escaped << std::hex;
+    for (auto c : value) {
+        if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            escaped << c;
+        } else {
+            escaped << '%' << std::uppercase << std::setw(2) << int((unsigned char)c);
+        }
+    }
+    return escaped.str();
+}
+
+std::string CustomLcdDisplay::SearchAndPlayMusic(const std::string& keyword,
+                                                const std::string& artist,
+                                                const std::string& title,
+                                                const std::string& candidates) {
+    if (navidrome_server_.empty() || navidrome_user_.empty() || navidrome_pass_.empty()) {
+        return "{\"status\": \"error\", \"message\": \"Navidrome 服务未配置，无法在曲库中检索\"}";
+    }
+
+    auto network = Board::GetInstance().GetNetwork();
+    if (!network) {
+        return "{\"status\": \"error\", \"message\": \"网络不可用，无法连接 Navidrome 服务器\"}";
+    }
+
+    ESP_LOGI(TAG, "SearchAndPlayMusic invoked: artist=[%s], title=[%s], keyword=[%s], candidates=[%s]",
+             artist.c_str(), title.c_str(), keyword.c_str(), candidates.c_str());
+
+    bool is_random_mode = false;
+    std::string lower_kw = keyword;
+    std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
+    if (lower_kw == "random" || lower_kw == "随机" || lower_kw == "随便" || lower_kw == "随意" ||
+        lower_kw == "推荐" || lower_kw == "一点" || lower_kw == "来点音乐") {
+        is_random_mode = true;
+    } else if (keyword.empty() && artist.empty() && title.empty() && candidates.empty()) {
+        is_random_mode = true;
+    }
+
+    std::vector<MusicTrack> matched_tracks;
+    std::set<std::string> seen_ids;
+
+    if (is_random_mode) {
+        std::string rand_url = navidrome_server_ +
+                               "/rest/getRandomSongs.view?u=" + navidrome_user_ +
+                               "&p=" + navidrome_pass_ +
+                               "&v=1.16.1&c=xiaozhi&f=json&size=12";
+        ESP_LOGI(TAG, "Navidrome random mode triggered: fetching random songs");
+        auto http = network->CreateHttp(0);
+        if (http) {
+            http->SetTimeout(2500);
+            if (http->Open("GET", rand_url)) {
+                auto status = http->GetStatusCode();
+                if (status && *status == 200) {
+                    std::string body = http->ReadAll();
+                    cJSON* root = cJSON_Parse(body.c_str());
+                    if (root) {
+                        cJSON* resp = cJSON_GetObjectItem(root, "subsonic-response");
+                        if (resp) {
+                            cJSON* random_songs = cJSON_GetObjectItem(resp, "randomSongs");
+                            if (random_songs) {
+                                cJSON* song_arr = cJSON_GetObjectItem(random_songs, "song");
+                                if (song_arr && cJSON_IsArray(song_arr)) {
+                                    int count = cJSON_GetArraySize(song_arr);
+                                    for (int i = 0; i < count; ++i) {
+                                        cJSON* s = cJSON_GetArrayItem(song_arr, i);
+                                        if (!s) continue;
+                                        cJSON* c_id = cJSON_GetObjectItem(s, "id");
+                                        cJSON* c_title = cJSON_GetObjectItem(s, "title");
+                                        cJSON* c_artist = cJSON_GetObjectItem(s, "artist");
+                                        cJSON* c_dur = cJSON_GetObjectItem(s, "duration");
+                                        if (!c_id || !c_id->valuestring) continue;
+                                        MusicTrack t;
+                                        t.id = c_id->valuestring;
+                                        t.title = (c_title && c_title->valuestring) ? c_title->valuestring : "未知曲目";
+                                        t.artist = (c_artist && c_artist->valuestring) ? c_artist->valuestring : "未知艺术家";
+                                        t.duration_sec = c_dur ? c_dur->valueint : 0;
+                                        t.source = "NAVIDROME";
+                                        t.stream_url = waveshare185c::ServiceConfig::GenerateNavidromeDirectUrl(
+                                            navidrome_server_, t.id, navidrome_user_, navidrome_pass_, true);
+                                        matched_tracks.push_back(std::move(t));
+                                    }
+                                }
+                            }
+                        }
+                        cJSON_Delete(root);
+                    }
+                }
+                http->Close();
+            }
+        }
+        if (matched_tracks.empty() && !default_playlist_.empty()) {
+            matched_tracks = default_playlist_;
+        }
+    } else {
+        // 1. 构建轻量检索策略：优先单次精准，最多只执行 2 次查询，单次超时 1800ms
+        std::vector<std::pair<std::string, int>> search_queries; // {query_str, requested_count}
+
+        if (!artist.empty() && !title.empty()) {
+            search_queries.push_back({artist + " " + title, 10});
+            search_queries.push_back({artist, 30});
+        } else if (!artist.empty()) {
+            // 用户指定歌手（如陈奕迅/刘欢），一次性拉取 30 首，随后在本地做随机洗牌
+            search_queries.push_back({artist, 30});
+        } else if (!title.empty()) {
+            search_queries.push_back({title, 10});
+        } else if (!keyword.empty()) {
+            search_queries.push_back({keyword, 15});
+        }
+
+        // 解析 candidates（情绪场景由大模型拓展出的经典曲目）
+        if (!candidates.empty() && search_queries.empty()) {
+            std::stringstream ss(candidates);
+            std::string item;
+            int cand_limit = 0;
+            while (std::getline(ss, item, ',') && cand_limit < 3) {
+                while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) item.erase(0, 1);
+                while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) item.pop_back();
+                if (!item.empty()) {
+                    search_queries.push_back({item, 10});
+                    cand_limit++;
+                }
+            }
+        }
+
+        if (search_queries.empty()) {
+            return "{\"status\": \"error\", \"message\": \"未提供任何有效的检索关键词\"}";
+        }
+
+        auto str_contains_ic = [](const std::string& haystack, const std::string& needle) {
+            if (needle.empty()) return true;
+            auto it = std::search(
+                haystack.begin(), haystack.end(),
+                needle.begin(), needle.end(),
+                [](char ch1, char ch2) { return std::tolower((unsigned char)ch1) == std::tolower((unsigned char)ch2); }
+            );
+            return (it != haystack.end());
+        };
+
+        for (size_t q_idx = 0; q_idx < search_queries.size(); ++q_idx) {
+            const auto& q_item = search_queries[q_idx];
+            std::string encoded_q = UrlEncodeQuery(q_item.first);
+            std::string search_url = navidrome_server_ + "/rest/search3.view?u=" + navidrome_user_ +
+                                     "&p=" + navidrome_pass_ +
+                                     "&v=1.16.1&c=xiaozhi&f=json&songCount=" +
+                                     std::to_string(q_item.second) + "&query=" + encoded_q;
+
+            ESP_LOGI(TAG, "Navidrome search3 query [%d/%d]: %s (songCount=%d)",
+                     (int)(q_idx + 1), (int)search_queries.size(), q_item.first.c_str(), q_item.second);
+
+            auto http = network->CreateHttp(0);
+            if (!http) continue;
+            http->SetTimeout(1800); // 严格限制 1.8 秒超时，绝不阻塞看门狗
+            if (http->Open("GET", search_url)) {
+                auto status = http->GetStatusCode();
+                if (status && *status == 200) {
+                    std::string body = http->ReadAll();
+                    cJSON* root = cJSON_Parse(body.c_str());
+                    if (root) {
+                        cJSON* resp = cJSON_GetObjectItem(root, "subsonic-response");
+                        if (resp) {
+                            cJSON* s_res = cJSON_GetObjectItem(resp, "searchResult3");
+                            if (s_res) {
+                                cJSON* song_arr = cJSON_GetObjectItem(s_res, "song");
+                                if (song_arr && cJSON_IsArray(song_arr)) {
+                                    int count = cJSON_GetArraySize(song_arr);
+                                    for (int i = 0; i < count; ++i) {
+                                        cJSON* s = cJSON_GetArrayItem(song_arr, i);
+                                        if (!s) continue;
+                                        cJSON* c_id = cJSON_GetObjectItem(s, "id");
+                                        cJSON* c_title = cJSON_GetObjectItem(s, "title");
+                                        cJSON* c_artist = cJSON_GetObjectItem(s, "artist");
+                                        cJSON* c_dur = cJSON_GetObjectItem(s, "duration");
+                                        if (!c_id || !c_id->valuestring) continue;
+
+                                        std::string song_id = c_id->valuestring;
+                                        if (seen_ids.count(song_id)) continue;
+
+                                        MusicTrack t;
+                                        t.id = song_id;
+                                        t.title = (c_title && c_title->valuestring) ? c_title->valuestring : "未知曲目";
+                                        t.artist = (c_artist && c_artist->valuestring) ? c_artist->valuestring : "未知艺术家";
+                                        t.duration_sec = c_dur ? c_dur->valueint : 0;
+
+                                        // 相关度检查：过滤无关的模糊命中
+                                        bool relevant = true;
+                                        if (!artist.empty()) {
+                                            relevant = str_contains_ic(t.artist, artist) || str_contains_ic(t.title, artist);
+                                        } else if (!title.empty()) {
+                                            relevant = str_contains_ic(t.title, title);
+                                        } else if (!keyword.empty()) {
+                                            relevant = str_contains_ic(t.title, keyword) || str_contains_ic(t.artist, keyword);
+                                        }
+                                        if (!relevant) {
+                                            continue;
+                                        }
+
+                                        seen_ids.insert(song_id);
+                                        t.source = "NAVIDROME";
+                                        t.stream_url = waveshare185c::ServiceConfig::GenerateNavidromeDirectUrl(
+                                            navidrome_server_, t.id, navidrome_user_, navidrome_pass_, true);
+                                        matched_tracks.push_back(std::move(t));
+                                    }
+                                }
+                            }
+                        }
+                        cJSON_Delete(root);
+                    }
+                }
+                http->Close();
+            }
+
+            // 只要当前查询命中了曲目，就提前结束，保证极速响应
+            if (!matched_tracks.empty()) {
+                break;
+            }
+        }
+    }
+
+    if (matched_tracks.empty()) {
+        ESP_LOGW(TAG, "Search completed: no matching tracks found in Navidrome for artist=[%s], title=[%s], keyword=[%s]",
+                 artist.c_str(), title.c_str(), keyword.c_str());
+        return "{\"status\": \"not_found\", \"message\": \"在私有 Navidrome 曲库中未找到相关歌曲，已保持当前播放列表不变。\"}";
+    }
+
+    // 若命中了多首曲目（例如指定歌手陈奕迅返回了多首），进行随机洗牌（Shuffle），每次生成不一样的生动歌单
+    if (matched_tracks.size() > 1) {
+        std::random_device rd;
+        std::default_random_engine rng(rd());
+        std::shuffle(matched_tracks.begin(), matched_tracks.end(), rng);
+    }
+
+    // 截断上限为 12 首，保护内存
+    if (matched_tracks.size() > 12) {
+        matched_tracks.resize(12);
+    }
+
+    ESP_LOGI(TAG, "Search completed: found %d tracks (shuffled), starting playback with: %s - %s",
+             (int)matched_tracks.size(), matched_tracks[0].title.c_str(), matched_tracks[0].artist.c_str());
+
+    // 构建给大模型的详细结果 JSON，明确告知已在硬件端起播，指示大模型保持沉默无需朗读
+    cJSON* res_json = cJSON_CreateObject();
+    cJSON_AddStringToObject(res_json, "status", "success");
+    cJSON_AddNumberToObject(res_json, "matched_count", (int)matched_tracks.size());
+    cJSON_AddStringToObject(res_json, "playing_title", matched_tracks[0].title.c_str());
+    cJSON_AddStringToObject(res_json, "playing_artist", matched_tracks[0].artist.c_str());
+    cJSON_AddStringToObject(res_json, "instruction", "Playback started. Remain completely silent and do NOT read any text.");
+    cJSON* song_names = cJSON_AddArrayToObject(res_json, "songs");
+    for (const auto& t : matched_tracks) {
+        std::string item_desc = t.title + " - " + t.artist;
+        cJSON_AddItemToArray(song_names, cJSON_CreateString(item_desc.c_str()));
+    }
+    char* printed = cJSON_PrintUnformatted(res_json);
+    std::string result_str = printed ? printed : "{\"status\": \"success\"}";
+    cJSON_free(printed);
+    cJSON_Delete(res_json);
+
+    // 调度到主线程：更新播放列表并立即起播、切至播放屏，自动退出对话模式
+    Application::GetInstance().Schedule([this, new_list = std::move(matched_tracks)]() mutable {
+        DisplayLockGuard lock(this);
+        // 保留原日常随机列表副本（如果之前为空）
+        if (default_playlist_.empty() && !playlist_.empty()) {
+            default_playlist_ = playlist_;
+        }
+        playlist_ = std::move(new_list);
+        current_track_idx_ = 0;
+        play_elapsed_sec_ = 0;
+        is_search_playlist_ = true;
+
+        // 1. 隐藏小智唤醒对话遮罩层，直接展示全屏音乐播放器
+        HideWakeupOverlay();
+        ShowPlayerPage();
+
+        // 2. 退出小智对话模式，打断后续 TTS 播报，避免多余声音打扰音乐
+        auto& app = Application::GetInstance();
+        app.AbortSpeaking(kAbortReasonNone);
+        app.GetAudioService().ResetDecoder();
+        app.SetDeviceState(kDeviceStateIdle);
+
+        // 3. 立即起播音乐
+        StartNavidromeStream(0);
+    });
+
+    return result_str;
 }
 #endif
 
@@ -4026,7 +4469,7 @@ void CustomLcdDisplay::UpdateServerUI() {
 void CustomLcdDisplay::CheckAndTriggerServerFetch() {
     auto& app = Application::GetInstance();
     auto state = app.GetDeviceState();
-    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+    if (state != kDeviceStateIdle) {
         return;
     }
 
@@ -4035,7 +4478,17 @@ void CustomLcdDisplay::CheckAndTriggerServerFetch() {
         return;  // 未配置状态绝不产生网络请求
     }
 
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        return;
+    }
+#endif
+
     int interval_s = beszel_fetch_interval_s_ > 0 ? beszel_fetch_interval_s_ : 15;
+    // 当不在服务器监控页面时，拉取间隔放缓至 120 秒，避免持续占用网络 socket 与内存
+    if (current_page_ != 3) {
+        interval_s = 120;
+    }
 
     int64_t now_sec = esp_timer_get_time() / 1000000;
     if (server_fetching_) {
@@ -4058,10 +4511,20 @@ void CustomLcdDisplay::CheckAndTriggerServerFetch() {
             ESP_LOGI(TAG, "Beszel fetch cycle completed.");
             vTaskDelete(NULL);
         },
-        "beszel_fetch", 6144, this, 1, nullptr);
+        "beszel_fetch", 4096, this, 1, nullptr);
 }
 
 void CustomLcdDisplay::FetchBeszelData() {
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() != kDeviceStateIdle) {
+        return;
+    }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        return;
+    }
+#endif
+
     if (beszel_hub_url_.empty() || beszel_user_.empty() || beszel_pass_.empty()) {
         beszel_status_ = ServiceStatus::kUnconfigured;
         return;
@@ -4127,7 +4590,7 @@ void CustomLcdDisplay::FetchBeszelData() {
         }
     }
 
-    if (beszel_token_.empty()) {
+    if (beszel_token_.empty() || app.GetDeviceState() != kDeviceStateIdle) {
         Application::GetInstance().Schedule([this]() {
             if (current_page_ == 3 && server_ui_created_) {
                 UpdateServerUI();
@@ -4135,6 +4598,11 @@ void CustomLcdDisplay::FetchBeszelData() {
         });
         return;
     }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (is_playing_) {
+        return;
+    }
+#endif
 
     // 2. 使用 Token 获取节点实时数据 (PocketBase 直接传 token，不能带 Bearer 前缀)
     auto http_data = network->CreateHttp(0);
@@ -4148,6 +4616,10 @@ void CustomLcdDisplay::FetchBeszelData() {
             if (status && *status == 200) {
                 std::string body = http_data->ReadAll();
                 ESP_LOGI(TAG, "Beszel records body read (%zu bytes)", body.size());
+                if (app.GetDeviceState() != kDeviceStateIdle) {
+                    http_data->Close();
+                    return;
+                }
                 beszel_status_ = ServiceStatus::kOk;
                 ParseAndApplyBeszel(body);
             } else if (status && (*status == 401 || *status == 403)) {

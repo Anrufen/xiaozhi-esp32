@@ -36,6 +36,10 @@ public:
     int GetTargetIndex() const;
     std::string GetTargetName() const;
 
+    // 计算并获取下一个播放设备索引（纯查询，不就地修改内部状态）：-1(本机) -> 0 -> 1 -> ... ->
+    // -1(本机)
+    int GetNextTargetIndex() const;
+
     // 循环切换到下一个播放设备：-1(本机) -> 0 -> 1 -> ... -> -1(本机)
     int CycleNextTarget();
 
@@ -47,7 +51,10 @@ public:
     bool Pause(int device_idx = -1);
     bool Stop(int device_idx = -1);
 
-    bool IsScanning() const { return is_scanning_; }
+    bool IsScanning() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return is_scanning_;
+    }
 
 private:
     DlnaController() = default;

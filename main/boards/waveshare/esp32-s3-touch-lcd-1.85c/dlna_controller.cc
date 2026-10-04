@@ -67,7 +67,8 @@ std::string ReadDeviceXmlTrimmed(Http* http, size_t max_bytes = 4096) {
         xml.append(chunk, *res);
         total += *res;
 
-        // 剪枝判断：只要抓到了 friendlyName 和 AVTransport 及其结束标签，无需再读庞大的图标与多余描述
+        // 剪枝判断：只要抓到了 friendlyName 和 AVTransport
+        // 及其结束标签，无需再读庞大的图标与多余描述
         if (xml.find("urn:schemas-upnp-org:service:AVTransport:1") != std::string::npos &&
             xml.find("</service>") != std::string::npos &&
             xml.find("</friendlyName>") != std::string::npos) {
@@ -114,8 +115,8 @@ std::string DlnaController::EscapeXml(const std::string& input) {
 }
 
 bool DlnaController::ParseDeviceXml(const std::string& xml, const std::string& base_url,
-                                   std::string& out_name, std::string& out_control_url,
-                                   std::string& out_udn) {
+                                    std::string& out_name, std::string& out_control_url,
+                                    std::string& out_udn) {
     out_name = ExtractXmlTag(xml, "friendlyName");
     out_udn = ExtractXmlTag(xml, "UDN");
 
@@ -153,9 +154,11 @@ bool DlnaController::ParseDeviceXml(const std::string& xml, const std::string& b
 }
 
 bool DlnaController::ProbeAndAddDevice(const std::string& location_url) {
-    if (location_url.empty()) return false;
+    if (location_url.empty())
+        return false;
     auto network = Board::GetInstance().GetNetwork();
-    if (!network) return false;
+    if (!network)
+        return false;
 
     std::vector<std::string> urls_to_try;
     if (location_url.rfind("http://", 0) == 0 || location_url.rfind("https://", 0) == 0) {
@@ -181,7 +184,8 @@ bool DlnaController::ProbeAndAddDevice(const std::string& location_url) {
     for (const auto& url : urls_to_try) {
         ESP_LOGI(TAG, "Probing DLNA at: %s", url.c_str());
         auto http = network->CreateHttp(0);
-        if (!http) continue;
+        if (!http)
+            continue;
         http->SetTimeout(2500);
         if (http->Open("GET", url)) {
             auto status = http->GetStatusCode();
@@ -195,7 +199,8 @@ bool DlnaController::ProbeAndAddDevice(const std::string& location_url) {
                     dev.control_url = ctrl_url;
                     dev.location = url;
                     dev.udn = udn;
-                    ESP_LOGI(TAG, "Manual DLNA probe success: [%s] -> %s", name.c_str(), ctrl_url.c_str());
+                    ESP_LOGI(TAG, "Manual DLNA probe success: [%s] -> %s", name.c_str(),
+                             ctrl_url.c_str());
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
                         // 去重
@@ -220,6 +225,12 @@ bool DlnaController::ProbeAndAddDevice(const std::string& location_url) {
 }
 
 void DlnaController::StartDiscovery(DeviceListCallback on_update, bool force) {
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() != kDeviceStateIdle) {
+        ESP_LOGI(TAG, "Device not idle, skip DLNA discovery to avoid network contention");
+        return;
+    }
+
     int64_t now_ms = esp_timer_get_time() / 1000;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -228,15 +239,13 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update, bool force) {
             return;
         }
 
-        // 若非强制刷新，且 60 秒内已扫描过并持有设备，直接回调缓存
-        if (!force && !devices_.empty() && (now_ms - last_scan_time_ms_ < 60000)) {
+        // 关键优化：只要已发现局域网设备且非 force 强制刷新，直接复用缓存，绝不每次切页重新发 SSDP 广播！
+        if (!force && !devices_.empty()) {
             ESP_LOGI(TAG, "Reusing %d cached DLNA devices (scanned %lld ms ago)",
                      (int)devices_.size(), (long long)(now_ms - last_scan_time_ms_));
             if (on_update) {
                 auto cached = devices_;
-                Application::GetInstance().Schedule([on_update, cached]() {
-                    on_update(cached);
-                });
+                Application::GetInstance().Schedule([on_update, cached]() { on_update(cached); });
             }
             return;
         }
@@ -298,8 +307,7 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update, bool force) {
                 "HOST: 239.255.255.250:1900\r\n"
                 "MAN: \"ssdp:discover\"\r\n"
                 "MX: 1\r\n"
-                "ST: urn:schemas-upnp-org:service:AVTransport:1\r\n\r\n"
-            };
+                "ST: urn:schemas-upnp-org:service:AVTransport:1\r\n\r\n"};
 
             for (const char* q : queries) {
                 sendto(sock, q, strlen(q), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
@@ -311,8 +319,8 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update, bool force) {
             while (true) {
                 struct sockaddr_in src_addr;
                 socklen_t addr_len = sizeof(src_addr);
-                int len = recvfrom(sock, rx_buf.get(), 1023, 0,
-                                   (struct sockaddr*)&src_addr, &addr_len);
+                int len =
+                    recvfrom(sock, rx_buf.get(), 1023, 0, (struct sockaddr*)&src_addr, &addr_len);
                 if (len <= 0) {
                     break;  // 超时退出
                 }
@@ -321,8 +329,10 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update, bool force) {
 
                 // 提取 LOCATION 字段（不区分大小写）
                 size_t loc_pos = resp.find("LOCATION:");
-                if (loc_pos == std::string::npos) loc_pos = resp.find("Location:");
-                if (loc_pos == std::string::npos) loc_pos = resp.find("location:");
+                if (loc_pos == std::string::npos)
+                    loc_pos = resp.find("Location:");
+                if (loc_pos == std::string::npos)
+                    loc_pos = resp.find("location:");
 
                 if (loc_pos != std::string::npos) {
                     size_t start = loc_pos + 9;
@@ -349,6 +359,10 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update, bool force) {
 
             if (network) {
                 for (const auto& loc : discovered_locations) {
+                    if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+                        ESP_LOGI(TAG, "Device became active, stopping DLNA discovery early");
+                        break;
+                    }
                     // 让出 CPU 喂狗，避免网络 IO 集中导致看门狗超时
                     vTaskDelay(pdMS_TO_TICKS(40));
 
@@ -408,14 +422,13 @@ void DlnaController::StartDiscovery(DeviceListCallback on_update, bool force) {
             if (self->on_update_cb_) {
                 auto cb = self->on_update_cb_;
                 auto current_devices = self->GetDevices();
-                Application::GetInstance().Schedule([cb, current_devices]() {
-                    cb(current_devices);
-                });
+                Application::GetInstance().Schedule(
+                    [cb, current_devices]() { cb(current_devices); });
             }
 
             vTaskDelete(NULL);
         },
-        "dlna_ssdp", 6144, this, 3, NULL);
+        "dlna_ssdp", 8192, this, 3, NULL);
 }
 
 std::vector<DlnaDevice> DlnaController::GetDevices() const {
@@ -447,27 +460,29 @@ std::string DlnaController::GetTargetName() const {
     return "本机播放";
 }
 
-int DlnaController::CycleNextTarget() {
+int DlnaController::GetNextTargetIndex() const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (devices_.empty()) {
-        target_index_ = -1;
         return -1;
     }
     if (target_index_ < 0) {
-        target_index_ = 0;
-    } else {
-        target_index_++;
-        if (target_index_ >= (int)devices_.size()) {
-            target_index_ = -1;  // 循环回到本机
-        }
+        return 0;
     }
-    ESP_LOGI(TAG, "Cycled DLNA playback target to: %d (%s)", target_index_,
-             target_index_ == -1 ? "Local" : devices_[target_index_].name.c_str());
-    return target_index_;
+    int next = target_index_ + 1;
+    if (next >= (int)devices_.size()) {
+        return -1;  // 循环回到本机
+    }
+    return next;
+}
+
+int DlnaController::CycleNextTarget() {
+    int next = GetNextTargetIndex();
+    SetTargetIndex(next);
+    return next;
 }
 
 bool DlnaController::SendSoapAction(const std::string& control_url, const std::string& action,
-                                   const std::string& soap_body) {
+                                    const std::string& soap_body) {
     auto network = Board::GetInstance().GetNetwork();
     if (!network) {
         ESP_LOGE(TAG, "Network not available for SOAP action %s", action.c_str());
@@ -494,18 +509,21 @@ bool DlnaController::SendSoapAction(const std::string& control_url, const std::s
         "</s:Envelope>\r\n";
 
     http->SetContent(std::move(payload));
+    bool success = false;
     if (http->Open("POST", control_url)) {
         auto status = http->GetStatusCode();
         ESP_LOGI(TAG, "SOAP action [%s] response status: %d", action.c_str(),
                  status ? *status : -1);
-        return (status && *status >= 200 && *status < 300);
+        success = (status && *status >= 200 && *status < 300);
+        http->Close();
+        return success;
     }
     ESP_LOGW(TAG, "SOAP action [%s] request failed to open", action.c_str());
     return false;
 }
 
 bool DlnaController::Play(int device_idx, const std::string& media_url, const std::string& title,
-                         const std::string& artist) {
+                          const std::string& artist) {
     std::string ctrl_url;
     std::string dev_name;
     {
@@ -531,18 +549,23 @@ bool DlnaController::Play(int device_idx, const std::string& media_url, const st
         "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
         "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">"
         "<item id=\"0\" parentID=\"-1\" restricted=\"1\">"
-        "<dc:title>" + esc_title + "</dc:title>"
-        "<dc:creator>" + esc_artist + "</dc:creator>"
+        "<dc:title>" +
+        esc_title +
+        "</dc:title>"
+        "<dc:creator>" +
+        esc_artist +
+        "</dc:creator>"
         "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
         "</item></DIDL-Lite>";
     std::string esc_didl = EscapeXml(raw_didl);
 
     std::ostringstream set_uri_body;
-    set_uri_body << "    <u:SetAVTransportURI xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">\r\n"
-                 << "      <InstanceID>0</InstanceID>\r\n"
-                 << "      <CurrentURI>" << esc_url << "</CurrentURI>\r\n"
-                 << "      <CurrentURIMetaData>" << esc_didl << "</CurrentURIMetaData>\r\n"
-                 << "    </u:SetAVTransportURI>\r\n";
+    set_uri_body
+        << "    <u:SetAVTransportURI xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">\r\n"
+        << "      <InstanceID>0</InstanceID>\r\n"
+        << "      <CurrentURI>" << esc_url << "</CurrentURI>\r\n"
+        << "      <CurrentURIMetaData>" << esc_didl << "</CurrentURIMetaData>\r\n"
+        << "    </u:SetAVTransportURI>\r\n";
 
     if (!SendSoapAction(ctrl_url, "SetAVTransportURI", set_uri_body.str())) {
         ESP_LOGW(TAG, "SetAVTransportURI failed for %s", dev_name.c_str());
@@ -560,7 +583,7 @@ bool DlnaController::Play(int device_idx, const std::string& media_url, const st
 }
 
 bool DlnaController::PlayCurrent(const std::string& media_url, const std::string& title,
-                                const std::string& artist) {
+                                 const std::string& artist) {
     int idx = GetTargetIndex();
     if (idx < 0) {
         return false;

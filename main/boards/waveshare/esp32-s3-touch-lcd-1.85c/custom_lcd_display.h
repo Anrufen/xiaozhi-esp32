@@ -110,6 +110,8 @@ public:
     void OnPlayerPlayPauseClicked();
     void OnPlayerPrevClicked();
     void OnPlayerNextClicked();
+    bool IsPlaying() const { return is_playing_; }
+    void StopNavidromeStream();
 
     // 直链获取与 DLNA 设备控制
     std::string GetCurrentTrackDirectUrl(bool for_dlna = true);
@@ -120,6 +122,11 @@ public:
     std::vector<waveshare185c::DlnaDevice> GetDlnaDevices() const;
     int GetCurrentPlaybackTarget() const;
     std::string GetCurrentPlaybackTargetName() const;
+
+    // 智能曲库检索与场景播放（方案 B：大语言模型语义改写与定向点歌）
+    std::string SearchAndPlayMusic(const std::string& keyword, const std::string& artist = "",
+                                   const std::string& title = "",
+                                   const std::string& candidates = "");
 
     // UI 刷新
     void UpdatePlayerUI();
@@ -225,6 +232,7 @@ private:
 
     // 播放器控件
     lv_obj_t* player_header_label_ = nullptr;
+    lv_obj_t* player_device_label_ = nullptr;
     lv_obj_t* player_arc_ = nullptr;
     lv_obj_t* player_disc_icon_ = nullptr;
     lv_obj_t* player_title_label_ = nullptr;
@@ -255,15 +263,16 @@ private:
 
     // 流媒体播放任务控制
     void StartNavidromeStream(size_t track_idx);
-    void StopNavidromeStream();
     TaskHandle_t stream_task_handle_ = nullptr;
     bool stream_stop_requested_ = false;
     uint32_t current_playback_id_ = 0;
 
-    // 播放器状态
+    // 播放器状态（支持日常默认随机歌单与 AI 场景歌单隔离）
     std::vector<MusicTrack> playlist_;
+    std::vector<MusicTrack> default_playlist_;
     size_t current_track_idx_ = 0;
     bool is_playing_ = false;
+    bool is_search_playlist_ = false;
     uint32_t play_elapsed_sec_ = 0;
 #else
     inline void SetPlayerAnimationActive(bool /*active*/) {}
@@ -335,29 +344,30 @@ private:
 
     // 配网与设备引导界面（WiFi Provisioning Screen）
     void SetupWifiConfigOverlay();
-    void ShowWifiConfigOverlay(const std::string& ssid = "", const std::string& url = "", const std::string& code = "");
+    void ShowWifiConfigOverlay(const std::string& ssid = "", const std::string& url = "",
+                               const std::string& code = "");
     void HideWifiConfigOverlay();
 
-    lv_obj_t* wakeup_overlay_ = nullptr;        // 360x360 全屏黑底容器
-    lv_obj_t* led_eye_left_ = nullptr;          // 虚拟 LED 形象左眼
-    lv_obj_t* led_eye_right_ = nullptr;         // 虚拟 LED 形象右眼
-    lv_obj_t* wakeup_title_label_ = nullptr;    // “正在聆听” / “小智思考中” / “正在回答”
-    lv_obj_t* wakeup_icon_label_ = nullptr;     // 状态专属 Material 图标
+    lv_obj_t* wakeup_overlay_ = nullptr;      // 360x360 全屏黑底容器
+    lv_obj_t* led_eye_left_ = nullptr;        // 虚拟 LED 形象左眼
+    lv_obj_t* led_eye_right_ = nullptr;       // 虚拟 LED 形象右眼
+    lv_obj_t* wakeup_title_label_ = nullptr;  // “正在聆听” / “小智思考中” / “正在回答”
+    lv_obj_t* wakeup_icon_label_ = nullptr;   // 状态专属 Material 图标
 
     // 动态互斥展示区：频谱 VS 播报文本
-    lv_obj_t* wakeup_vu_container_ = nullptr;   // 频谱与分贝容器
-    lv_obj_t* wakeup_vu_bars_[10] = {nullptr};  // 10 根声压条
-    lv_obj_t* wakeup_db_label_ = nullptr;       // 分贝数值
-    lv_obj_t* wakeup_text_container_ = nullptr; // 播报文本透明容器
-    lv_obj_t* wakeup_text_label_ = nullptr;     // 文本内容标签
+    lv_obj_t* wakeup_vu_container_ = nullptr;    // 频谱与分贝容器
+    lv_obj_t* wakeup_vu_bars_[10] = {nullptr};   // 10 根声压条
+    lv_obj_t* wakeup_db_label_ = nullptr;        // 分贝数值
+    lv_obj_t* wakeup_text_container_ = nullptr;  // 播报文本透明容器
+    lv_obj_t* wakeup_text_label_ = nullptr;      // 文本内容标签
 
     // 流式连续播报文本拼接缓存
     std::string assistant_stream_text_;
     bool is_new_assistant_turn_ = true;
 
     // 10 秒倒计时与律动定时器
-    lv_timer_t* wakeup_timer_ = nullptr;        // 40ms 高帧率律动定时器
-    lv_timer_t* countdown_timer_ = nullptr;     // 1s 真实倒计时定时器
+    lv_timer_t* wakeup_timer_ = nullptr;     // 40ms 高帧率律动定时器
+    lv_timer_t* countdown_timer_ = nullptr;  // 1s 真实倒计时定时器
     int auto_hide_seconds_left_ = 0;
     std::string current_title_base_ = "正在聆听";
 

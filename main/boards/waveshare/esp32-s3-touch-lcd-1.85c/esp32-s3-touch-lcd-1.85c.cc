@@ -19,6 +19,7 @@
 #include <esp_log.h>
 #include <esp_lvgl_port.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include "esp_io_expander_tca9554.h"
 #include "i2c_device.h"
 
@@ -443,21 +444,20 @@ private:
 
             // 1. 如果正在播报：按 Boot 键立即打断当前播报，直接转入聆听输入状态！
             if (state == kDeviceStateSpeaking) {
-                ESP_LOGI(TAG, "Boot button: abort speaking -> start listening");
+                ESP_LOGI(TAG, "Boot button: abort speaking -> continue listening");
+                Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
                 app.AbortSpeaking(kAbortReasonNone);
+                app.GetAudioService().ResetDecoder();
                 if (display) {
                     display->SetStatus(Lang::Strings::LISTENING);
                 }
-                app.Schedule([&app]() {
-                    app.ToggleChatState();
-                });
+                app.SetDeviceState(kDeviceStateListening);
                 return;
             }
 
             // 2. 如果正在聆听/连接中：用户再次按下 Boot 键，退出全屏语音模式返回桌面！
             if (state == kDeviceStateListening || state == kDeviceStateConnecting) {
                 ESP_LOGI(TAG, "Boot button: cancel voice mode -> exit to home");
-                app.StopListening();
                 if (display) {
                     auto* custom_disp = static_cast<CustomLcdDisplay*>(display);
                     if (custom_disp) {
@@ -466,13 +466,27 @@ private:
                         display->SetStatus(Lang::Strings::STANDBY);
                     }
                 }
-                app.SetDeviceState(kDeviceStateIdle);
+                app.GetAudioService().ResetDecoder();
+                if (state == kDeviceStateListening) {
+                    // 关闭音频通道（而非发送 stop listening）：服务端会直接丢弃当前未完成的轮次，
+                    // 不会再对半截语音做 ASR/LLM/TTS 并在回到桌面后“补播上一次的内容”
+                    app.ToggleChatState();
+                } else {
+                    app.SetDeviceState(kDeviceStateIdle);
+                }
                 return;
             }
 
             // 3. 待机空闲状态下：按下瞬间立即呼出全屏 HUD（给用户即时反馈，消除网络握手延迟感）
             if (state == kDeviceStateIdle) {
                 ESP_LOGI(TAG, "Boot button: instant wake up");
+                Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+                if (display_ && display_->IsPlaying()) {
+                    display_->StopNavidromeStream();
+                }
+#endif
+                app.GetAudioService().ResetDecoder();
                 if (display) {
                     display->SetStatus(Lang::Strings::LISTENING);
                 }
@@ -627,6 +641,21 @@ private:
             });
 
         mcp_server.AddTool(
+            "self.music.search_and_play",
+            "【点歌首选工具】当用户需要播放音乐、点歌、听指定歌手（如刘欢、陈奕迅、周杰伦等）、指定歌名、或某种心情风格的音乐时，必须优先调用本工具搜索私有曲库并起播。若未找到曲目将返回 not_found 且保留当前播放状态。",
+            PropertyList({Property("keyword", kPropertyTypeString, std::string("")),
+                          Property("artist", kPropertyTypeString, std::string("")),
+                          Property("title", kPropertyTypeString, std::string("")),
+                          Property("candidates", kPropertyTypeString, std::string(""))}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string keyword = properties["keyword"].value<std::string>();
+                std::string artist = properties["artist"].value<std::string>();
+                std::string title = properties["title"].value<std::string>();
+                std::string candidates = properties["candidates"].value<std::string>();
+                return display_->SearchAndPlayMusic(keyword, artist, title, candidates);
+            });
+
+        mcp_server.AddTool(
             "self.dlna.list_devices",
             "列出局域网内发现的所有 DLNA 播放设备（小米电视、小爱音箱等）以及当前投播目标",
             PropertyList(),
@@ -758,6 +787,55 @@ public:
         InitializeButtons();
         InitializeTools();
         GetBacklight()->RestoreBrightness();
+        GetAudioCodec()->SetOutputVolume(30);
+
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+        // 开机 10 秒后自动在后台静默查找局域网 DLNA 设备并缓存，切页直接复用缓存杜绝重新扫描
+        esp_timer_handle_t dlna_timer;
+        esp_timer_create_args_t timer_args = {
+            .callback = [](void* arg) {
+                auto& app = Application::GetInstance();
+                if (app.GetDeviceState() != kDeviceStateIdle) {
+                    ESP_LOGI("Board", "10s post-boot: device active, skip auto DLNA discovery");
+                    return;
+                }
+                ESP_LOGI("Board", "10s post-boot: triggering auto background DLNA discovery");
+                waveshare185c::DlnaController::GetInstance().StartDiscovery(nullptr, true);
+            },
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "dlna_init_scan",
+            .skip_unhandled_events = true
+        };
+        if (esp_timer_create(&timer_args, &dlna_timer) == ESP_OK) {
+            esp_timer_start_once(dlna_timer, 10000000); // 10秒后单次触发
+        }
+#endif
+
+        // 诊断：内部 SRAM 触底时记录分配失败来源及当时设备状态（仅低水位时输出，开销可忽略）
+        heap_caps_register_failed_alloc_callback([](size_t size, uint32_t caps, const char* func) {
+            ESP_EARLY_LOGE("HeapDiag", "alloc FAILED size=%u caps=0x%x func=%s free_int=%u",
+                           (unsigned)size, (unsigned)caps, func ? func : "?",
+                           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        });
+        esp_timer_handle_t heap_diag_timer;
+        esp_timer_create_args_t heap_diag_args = {
+            .callback = [](void* arg) {
+                size_t free_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                if (free_int < 24 * 1024) {
+                    ESP_EARLY_LOGW("HeapDiag", "LOW internal SRAM: free=%u largest=%u state=%d",
+                                   (unsigned)free_int,
+                                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                                   (int)Application::GetInstance().GetDeviceState());
+                }
+            },
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "heap_diag",
+            .skip_unhandled_events = true};
+        if (esp_timer_create(&heap_diag_args, &heap_diag_timer) == ESP_OK) {
+            esp_timer_start_periodic(heap_diag_timer, 250000);
+        }
     }
 
 #ifdef CONFIG_VERSION_1_0
