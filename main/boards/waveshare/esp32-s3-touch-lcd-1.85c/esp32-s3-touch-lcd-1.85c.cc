@@ -445,16 +445,26 @@ private:
             if (state == kDeviceStateSpeaking) {
                 ESP_LOGI(TAG, "Boot button: abort speaking -> start listening");
                 app.AbortSpeaking(kAbortReasonNone);
-                app.StartListening();
+                if (display) {
+                    display->SetStatus(Lang::Strings::LISTENING);
+                }
+                app.Schedule([&app]() {
+                    app.ToggleChatState();
+                });
                 return;
             }
 
-            // 2. 如果正在聆听或连接中：用户再次按下 Boot 键，退出全屏语音模式返回桌面！
+            // 2. 如果正在聆听/连接中：用户再次按下 Boot 键，退出全屏语音模式返回桌面！
             if (state == kDeviceStateListening || state == kDeviceStateConnecting) {
                 ESP_LOGI(TAG, "Boot button: cancel voice mode -> exit to home");
                 app.StopListening();
                 if (display) {
-                    display->SetStatus(Lang::Strings::STANDBY);
+                    auto* custom_disp = static_cast<CustomLcdDisplay*>(display);
+                    if (custom_disp) {
+                        custom_disp->HideWakeupOverlay();
+                    } else {
+                        display->SetStatus(Lang::Strings::STANDBY);
+                    }
                 }
                 app.SetDeviceState(kDeviceStateIdle);
                 return;

@@ -87,6 +87,10 @@ public:
     void ShowSettingsPage();
     void ShowServerPage();
 
+    // 全屏语音交互界面控制
+    void ShowWakeupOverlay();
+    void HideWakeupOverlay();
+
     // 触发刷新股票与天气（供外部/MCP或定时逻辑调用）
     void FetchStockData();
     void FetchWeatherData();
@@ -308,11 +312,10 @@ private:
 
     // 全屏赛博语音交互界面（Cyber Voice HUD）
     void SetupWakeupOverlay();
-    void ShowWakeupOverlay();
-    void HideWakeupOverlay();
     void UpdateWakeupVuAnimation();
-    void StartAutoHideTimer(uint32_t delay_ms = 10000);
-    void StopAutoHideTimer();
+    void StartCountdown(int seconds = 10);
+    void StopCountdown();
+    void UpdateCountdownDisplay();
 
     // 配网与设备引导界面（WiFi Provisioning Screen）
     void SetupWifiConfigOverlay();
@@ -322,7 +325,7 @@ private:
     lv_obj_t* wakeup_overlay_ = nullptr;        // 360x360 全屏黑底容器
     lv_obj_t* led_eye_left_ = nullptr;          // 虚拟 LED 形象左眼
     lv_obj_t* led_eye_right_ = nullptr;         // 虚拟 LED 形象右眼
-    lv_obj_t* wakeup_title_label_ = nullptr;    // “正在聆听” / “小智思考中” / “正在播报”
+    lv_obj_t* wakeup_title_label_ = nullptr;    // “正在聆听” / “小智思考中” / “正在回答”
     lv_obj_t* wakeup_icon_label_ = nullptr;     // 状态专属 Material 图标
 
     // 动态互斥展示区：频谱 VS 播报文本
@@ -336,8 +339,11 @@ private:
     std::string assistant_stream_text_;
     bool is_new_assistant_turn_ = true;
 
+    // 10 秒倒计时与律动定时器
     lv_timer_t* wakeup_timer_ = nullptr;        // 40ms 高帧率律动定时器
-    esp_timer_handle_t auto_hide_timer_ = nullptr; // 10秒无输入/播报完成自动退出
+    lv_timer_t* countdown_timer_ = nullptr;     // 1s 真实倒计时定时器
+    int auto_hide_seconds_left_ = 0;
+    std::string current_title_base_ = "正在聆听";
 
     // 配网模式界面控件
     lv_obj_t* wifi_config_overlay_ = nullptr;
