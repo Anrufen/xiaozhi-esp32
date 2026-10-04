@@ -401,60 +401,43 @@ void CustomLcdDisplay::SetupWakeupOverlay() {
     lv_obj_set_style_bg_color(m_left, lv_color_hex(0x859399), 0);
     lv_obj_remove_flag(m_left, LV_OBJ_FLAG_CLICKABLE);
 
-    // 3. 中央能量球 / 麦克风核心 (放大为 136x136，同心圆更加大气饱满)
-    lv_obj_t* orb_box = lv_obj_create(wakeup_overlay_);
-    lv_obj_set_size(orb_box, 136, 136);
-    lv_obj_align(orb_box, LV_ALIGN_TOP_MID, 0, 36);
-    lv_obj_set_style_bg_opa(orb_box, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(orb_box, 0, 0);
-    lv_obj_set_style_pad_all(orb_box, 0, 0);
-    lv_obj_remove_flag(orb_box, LV_OBJ_FLAG_SCROLLABLE);
+    // 3. 顶部虚拟发光 LED 双眼形象 (轻量化、灵动科技感、极致平衡性能)
+    lv_obj_t* led_face = lv_obj_create(wakeup_overlay_);
+    lv_obj_set_size(led_face, 140, 64);
+    lv_obj_align(led_face, LV_ALIGN_TOP_MID, 0, 50);
+    lv_obj_set_style_bg_opa(led_face, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(led_face, 0, 0);
+    lv_obj_set_style_pad_all(led_face, 0, 0);
+    lv_obj_remove_flag(led_face, LV_OBJ_FLAG_SCROLLABLE);
 
-    // 外圈轨道弧线
-    wakeup_orbit_arc_ = lv_arc_create(orb_box);
-    lv_obj_set_size(wakeup_orbit_arc_, 124, 124);
-    lv_obj_align(wakeup_orbit_arc_, LV_ALIGN_CENTER, 0, 0);
-    lv_arc_set_angles(wakeup_orbit_arc_, 45, 120);
-    lv_arc_set_bg_angles(wakeup_orbit_arc_, 0, 360);
-    lv_obj_remove_style(wakeup_orbit_arc_, nullptr, LV_PART_KNOB);
-    lv_obj_set_style_arc_width(wakeup_orbit_arc_, 1, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(wakeup_orbit_arc_, lv_color_hex(0x31353E), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(wakeup_orbit_arc_, 2, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(wakeup_orbit_arc_, lv_color_hex(0x00D2FF), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(wakeup_orbit_arc_, true, LV_PART_INDICATOR);
+    // 左眼
+    led_eye_left_ = lv_obj_create(led_face);
+    lv_obj_set_size(led_eye_left_, 22, 36);
+    lv_obj_set_pos(led_eye_left_, 36, 14);
+    lv_obj_set_style_bg_color(led_eye_left_, lv_color_hex(0x00D2FF), 0);
+    lv_obj_set_style_radius(led_eye_left_, 11, 0);
+    lv_obj_set_style_border_width(led_eye_left_, 0, 0);
+    lv_obj_set_style_shadow_width(led_eye_left_, 14, 0);
+    lv_obj_set_style_shadow_color(led_eye_left_, lv_color_hex(0x00D2FF), 0);
+    lv_obj_set_style_shadow_opa(led_eye_left_, 200, 0);
+    lv_obj_remove_flag(led_eye_left_, LV_OBJ_FLAG_SCROLLABLE);
 
-    // 中圈光晕
-    lv_obj_t* halo = lv_obj_create(orb_box);
-    lv_obj_set_size(halo, 96, 96);
-    lv_obj_align(halo, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(halo, lv_color_hex(0x00D2FF), 0);
-    lv_obj_set_style_bg_opa(halo, 35, 0);
-    lv_obj_set_style_radius(halo, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(halo, 0, 0);
+    // 右眼
+    led_eye_right_ = lv_obj_create(led_face);
+    lv_obj_set_size(led_eye_right_, 22, 36);
+    lv_obj_set_pos(led_eye_right_, 82, 14);
+    lv_obj_set_style_bg_color(led_eye_right_, lv_color_hex(0x00D2FF), 0);
+    lv_obj_set_style_radius(led_eye_right_, 11, 0);
+    lv_obj_set_style_border_width(led_eye_right_, 0, 0);
+    lv_obj_set_style_shadow_width(led_eye_right_, 14, 0);
+    lv_obj_set_style_shadow_color(led_eye_right_, lv_color_hex(0x00D2FF), 0);
+    lv_obj_set_style_shadow_opa(led_eye_right_, 200, 0);
+    lv_obj_remove_flag(led_eye_right_, LV_OBJ_FLAG_SCROLLABLE);
 
-    // 核心高光球体
-    wakeup_orb_core_ = lv_obj_create(orb_box);
-    lv_obj_set_size(wakeup_orb_core_, 58, 58);
-    lv_obj_align(wakeup_orb_core_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(wakeup_orb_core_, lv_color_hex(0x181C24), 0);
-    lv_obj_set_style_radius(wakeup_orb_core_, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(wakeup_orb_core_, 2, 0);
-    lv_obj_set_style_border_color(wakeup_orb_core_, lv_color_hex(0x00D2FF), 0);
-    lv_obj_set_style_shadow_width(wakeup_orb_core_, 16, 0);
-    lv_obj_set_style_shadow_color(wakeup_orb_core_, lv_color_hex(0x00D2FF), 0);
-    lv_obj_set_style_shadow_opa(wakeup_orb_core_, 180, 0);
-
-    lv_obj_t* inner_dot = lv_obj_create(wakeup_orb_core_);
-    lv_obj_set_size(inner_dot, 24, 24);
-    lv_obj_align(inner_dot, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(inner_dot, lv_color_hex(0x00D2FF), 0);
-    lv_obj_set_style_radius(inner_dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(inner_dot, 0, 0);
-
-    // 4. 状态标题区（使用中文字体，去除英文副标题）
+    // 4. 状态标题区（使用中文字体，去除竖线光标，换成 Material 状态图标）
     lv_obj_t* title_box = lv_obj_create(wakeup_overlay_);
     lv_obj_set_size(title_box, 240, 32);
-    lv_obj_align(title_box, LV_ALIGN_TOP_MID, 0, 182);
+    lv_obj_align(title_box, LV_ALIGN_TOP_MID, 0, 158);
     lv_obj_set_style_bg_opa(title_box, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(title_box, 0, 0);
     lv_obj_set_style_pad_all(title_box, 0, 0);
@@ -464,19 +447,19 @@ void CustomLcdDisplay::SetupWakeupOverlay() {
     lv_obj_set_style_text_font(wakeup_title_label_, &font_noto_sans_basic_20_4, 0);
     lv_obj_set_style_text_color(wakeup_title_label_, lv_color_hex(0xE0F2FE), 0);
     lv_label_set_text(wakeup_title_label_, "正在聆听");
-    lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -6, 0);
+    lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -12, 0);
 
-    wakeup_cursor_ = lv_obj_create(title_box);
-    lv_obj_set_size(wakeup_cursor_, 3, 18);
-    lv_obj_align_to(wakeup_cursor_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
-    lv_obj_set_style_bg_color(wakeup_cursor_, lv_color_hex(0x00D2FF), 0);
-    lv_obj_set_style_radius(wakeup_cursor_, 1, 0);
+    wakeup_icon_label_ = lv_label_create(title_box);
+    lv_obj_set_style_text_font(wakeup_icon_label_, &font_material_symbols_16_4, 0);
+    lv_obj_set_style_text_color(wakeup_icon_label_, lv_color_hex(0x00D2FF), 0);
+    lv_label_set_text(wakeup_icon_label_, MATERIAL_SYMBOLS_MIC);
+    lv_obj_align_to(wakeup_icon_label_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
 
     // 5. 核心互斥区域（频谱跳柱 VS 纯文本展示）
     // 5.1 频谱与分贝区 (VU-Meter)
     wakeup_vu_container_ = lv_obj_create(wakeup_overlay_);
     lv_obj_set_size(wakeup_vu_container_, 240, 72);
-    lv_obj_align(wakeup_vu_container_, LV_ALIGN_TOP_MID, 0, 220);
+    lv_obj_align(wakeup_vu_container_, LV_ALIGN_TOP_MID, 0, 208);
     lv_obj_set_style_bg_opa(wakeup_vu_container_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(wakeup_vu_container_, 0, 0);
     lv_obj_set_style_pad_all(wakeup_vu_container_, 0, 0);
@@ -503,10 +486,10 @@ void CustomLcdDisplay::SetupWakeupOverlay() {
     lv_label_set_text(wakeup_db_label_, "DECIBEL  -24.6 dB");
     lv_obj_align(wakeup_db_label_, LV_ALIGN_BOTTOM_MID, 0, -2);
 
-    // 5.2 播报文本区（去边框、去背景、纯透明，直接在正在聆听与底部地平线之间舒展排版）
+    // 5.2 播报文本区（去边框、去背景、纯透明，支持流式长文本平滑滚动）
     wakeup_text_container_ = lv_obj_create(wakeup_overlay_);
-    lv_obj_set_size(wakeup_text_container_, 280, 84);
-    lv_obj_align(wakeup_text_container_, LV_ALIGN_TOP_MID, 0, 218);
+    lv_obj_set_size(wakeup_text_container_, 280, 96);
+    lv_obj_align(wakeup_text_container_, LV_ALIGN_TOP_MID, 0, 204);
     lv_obj_set_style_bg_opa(wakeup_text_container_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(wakeup_text_container_, 0, 0);
     lv_obj_set_style_pad_all(wakeup_text_container_, 0, 0);
@@ -723,15 +706,41 @@ void CustomLcdDisplay::UpdateWakeupVuAnimation() {
     if (!wakeup_overlay_ || lv_obj_has_flag(wakeup_overlay_, LV_OBJ_FLAG_HIDDEN)) {
         return;
     }
-    // 如果当前切到了文本播报模式（vu_container 隐藏），暂停计算
+
+    static float phase = 0.0f;
+    static int blink_counter = 0;
+    phase += 0.12f;
+    blink_counter++;
+
+    // 虚拟发光 LED 双眼微动效 (极其轻量化)
+    if (led_eye_left_ && led_eye_right_) {
+        bool is_speaking = (wakeup_text_container_ && !lv_obj_has_flag(wakeup_text_container_, LV_OBJ_FLAG_HIDDEN));
+        if (is_speaking) {
+            // 播报时：双眼随着语音节奏在 24 ~ 36px 之间自然跃动
+            int eye_h = (int)(30.0f + sinf(phase * 2.2f) * 5.0f);
+            lv_obj_set_height(led_eye_left_, eye_h);
+            lv_obj_set_height(led_eye_right_, eye_h);
+            lv_obj_set_y(led_eye_left_, 14 + (36 - eye_h) / 2);
+            lv_obj_set_y(led_eye_right_, 14 + (36 - eye_h) / 2);
+        } else {
+            // 聆听时：双眼专注睁大，每隔约 80 帧 (约 3.2s) 自然眨眼
+            int eye_h = 36;
+            if (blink_counter % 80 < 4) {
+                eye_h = 6;
+            }
+            lv_obj_set_height(led_eye_left_, eye_h);
+            lv_obj_set_height(led_eye_right_, eye_h);
+            lv_obj_set_y(led_eye_left_, 14 + (36 - eye_h) / 2);
+            lv_obj_set_y(led_eye_right_, 14 + (36 - eye_h) / 2);
+        }
+    }
+
+    // 如果当前切到了文本播报模式（vu_container 隐藏），暂停频谱计算
     if (!wakeup_vu_container_ || lv_obj_has_flag(wakeup_vu_container_, LV_OBJ_FLAG_HIDDEN)) {
         return;
     }
 
-    static float phase = 0.0f;
-    phase += 0.12f;
     float base = sinf(phase) * 0.4f + 0.6f;
-
     for (int i = 0; i < 10; ++i) {
         if (!wakeup_vu_bars_[i]) continue;
         float noise = sinf(phase * 2.0f + i * 0.8f) * 0.5f + 0.5f;
@@ -749,11 +758,6 @@ void CustomLcdDisplay::UpdateWakeupVuAnimation() {
         } else {
             lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x31353E), 0);
         }
-    }
-
-    if (wakeup_orbit_arc_) {
-        int start_angle = (int)(phase * 30.0f) % 360;
-        lv_arc_set_angles(wakeup_orbit_arc_, start_angle, (start_angle + 75) % 360);
     }
 }
 
@@ -798,48 +802,69 @@ void CustomLcdDisplay::SetStatus(const char* status) {
 
     if (s == Lang::Strings::LISTENING || s.find("Listening") != std::string::npos ||
         s.find("正在聆听") != std::string::npos) {
-        // 唤醒进入等待输入状态：全屏展示，切换为频谱模式，启动 10s 倒计时！
         HideWifiConfigOverlay();
         ShowWakeupOverlay();
+        is_new_assistant_turn_ = true;
+
         if (wakeup_title_label_) {
             lv_label_set_text(wakeup_title_label_, "正在聆听");
-            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -6, 0);
-            if (wakeup_cursor_) {
-                lv_obj_align_to(wakeup_cursor_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -12, 0);
+            if (wakeup_icon_label_) {
+                lv_obj_set_style_text_color(wakeup_icon_label_, lv_color_hex(0x00D2FF), 0);
+                lv_label_set_text(wakeup_icon_label_, MATERIAL_SYMBOLS_MIC);
+                lv_obj_align_to(wakeup_icon_label_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
             }
         }
-        // 切为频谱模式
+        if (led_eye_left_ && led_eye_right_) {
+            lv_obj_set_style_bg_color(led_eye_left_, lv_color_hex(0x00D2FF), 0);
+            lv_obj_set_style_shadow_color(led_eye_left_, lv_color_hex(0x00D2FF), 0);
+            lv_obj_set_style_bg_color(led_eye_right_, lv_color_hex(0x00D2FF), 0);
+            lv_obj_set_style_shadow_color(led_eye_right_, lv_color_hex(0x00D2FF), 0);
+        }
         if (wakeup_vu_container_) {
             lv_obj_remove_flag(wakeup_vu_container_, LV_OBJ_FLAG_HIDDEN);
         }
         if (wakeup_text_container_) {
             lv_obj_add_flag(wakeup_text_container_, LV_OBJ_FLAG_HIDDEN);
         }
-        // 规则：唤醒之后若 10s 内无语音输入，自动退出
         StartAutoHideTimer(10000);
     } else if (s.find("Thinking") != std::string::npos || s.find("思考") != std::string::npos) {
         ShowWakeupOverlay();
         StopAutoHideTimer();
         if (wakeup_title_label_) {
             lv_label_set_text(wakeup_title_label_, "小智思考中");
-            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -6, 0);
-            if (wakeup_cursor_) {
-                lv_obj_align_to(wakeup_cursor_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -12, 0);
+            if (wakeup_icon_label_) {
+                lv_obj_set_style_text_color(wakeup_icon_label_, lv_color_hex(0x38BDF8), 0);
+                lv_label_set_text(wakeup_icon_label_, MATERIAL_SYMBOLS_PROGRESS_ACTIVITY);
+                lv_obj_align_to(wakeup_icon_label_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
             }
+        }
+        if (led_eye_left_ && led_eye_right_) {
+            lv_obj_set_style_bg_color(led_eye_left_, lv_color_hex(0x38BDF8), 0);
+            lv_obj_set_style_shadow_color(led_eye_left_, lv_color_hex(0x38BDF8), 0);
+            lv_obj_set_style_bg_color(led_eye_right_, lv_color_hex(0x38BDF8), 0);
+            lv_obj_set_style_shadow_color(led_eye_right_, lv_color_hex(0x38BDF8), 0);
         }
     } else if (s == Lang::Strings::SPEAKING || s.find("Speaking") != std::string::npos ||
                s.find("正在说话") != std::string::npos) {
-        // 播报中：停止退出定时器，切为纯文本模式
         ShowWakeupOverlay();
         StopAutoHideTimer();
         if (wakeup_title_label_) {
             lv_label_set_text(wakeup_title_label_, "正在播报");
-            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -6, 0);
-            if (wakeup_cursor_) {
-                lv_obj_align_to(wakeup_cursor_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -12, 0);
+            if (wakeup_icon_label_) {
+                lv_obj_set_style_text_color(wakeup_icon_label_, lv_color_hex(0x4EDEA3), 0);
+                lv_label_set_text(wakeup_icon_label_, MATERIAL_SYMBOLS_VOLUME_UP);
+                lv_obj_align_to(wakeup_icon_label_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
             }
         }
-        // 频谱位置变更为文本
+        if (led_eye_left_ && led_eye_right_) {
+            lv_obj_set_style_bg_color(led_eye_left_, lv_color_hex(0x4EDEA3), 0);
+            lv_obj_set_style_shadow_color(led_eye_left_, lv_color_hex(0x4EDEA3), 0);
+            lv_obj_set_style_bg_color(led_eye_right_, lv_color_hex(0x4EDEA3), 0);
+            lv_obj_set_style_shadow_color(led_eye_right_, lv_color_hex(0x4EDEA3), 0);
+        }
         if (wakeup_vu_container_) {
             lv_obj_add_flag(wakeup_vu_container_, LV_OBJ_FLAG_HIDDEN);
         }
@@ -848,15 +873,21 @@ void CustomLcdDisplay::SetStatus(const char* status) {
         }
     } else if (s == Lang::Strings::STANDBY || s.find("Standby") != std::string::npos ||
                s.find("待命") != std::string::npos) {
-        // 播报完成之后：标题变更为回答完毕，若无新输入 10s 后自动退出
         if (wakeup_title_label_) {
             lv_label_set_text(wakeup_title_label_, "回答完毕");
-            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -6, 0);
-            if (wakeup_cursor_) {
-                lv_obj_align_to(wakeup_cursor_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -12, 0);
+            if (wakeup_icon_label_) {
+                lv_obj_set_style_text_color(wakeup_icon_label_, lv_color_hex(0x94A3B8), 0);
+                lv_label_set_text(wakeup_icon_label_, MATERIAL_SYMBOLS_CHECK_CIRCLE);
+                lv_obj_align_to(wakeup_icon_label_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
             }
         }
-        // 规则：播报完成之后 10s 自动退出
+        if (led_eye_left_ && led_eye_right_) {
+            lv_obj_set_style_bg_color(led_eye_left_, lv_color_hex(0x859399), 0);
+            lv_obj_set_style_shadow_color(led_eye_left_, lv_color_hex(0x859399), 0);
+            lv_obj_set_style_bg_color(led_eye_right_, lv_color_hex(0x859399), 0);
+            lv_obj_set_style_shadow_color(led_eye_right_, lv_color_hex(0x859399), 0);
+        }
         StartAutoHideTimer(10000);
     }
 }
@@ -889,13 +920,17 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
     ShowWakeupOverlay();
 
     if (r == "user") {
-        // 用户输入识别完成：检测到了语音输入，重置定时器，频谱位置变更为纯文本
         StopAutoHideTimer();
+        assistant_stream_text_.clear();
+        is_new_assistant_turn_ = true;
+
         if (wakeup_title_label_) {
             lv_label_set_text(wakeup_title_label_, "我");
-            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -6, 0);
-            if (wakeup_cursor_) {
-                lv_obj_align_to(wakeup_cursor_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -12, 0);
+            if (wakeup_icon_label_) {
+                lv_obj_set_style_text_color(wakeup_icon_label_, lv_color_hex(0x00D2FF), 0);
+                lv_label_set_text(wakeup_icon_label_, MATERIAL_SYMBOLS_PERSON);
+                lv_obj_align_to(wakeup_icon_label_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
             }
         }
         if (wakeup_vu_container_) {
@@ -906,15 +941,17 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
         }
         if (wakeup_text_label_) {
             lv_label_set_text(wakeup_text_label_, text.c_str());
+            lv_obj_scroll_to_y(wakeup_text_container_, 0, LV_ANIM_OFF);
         }
     } else if (r == "assistant") {
-        // 播报时展示纯文本
         StopAutoHideTimer();
         if (wakeup_title_label_) {
             lv_label_set_text(wakeup_title_label_, "小智");
-            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -6, 0);
-            if (wakeup_cursor_) {
-                lv_obj_align_to(wakeup_cursor_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+            lv_obj_align(wakeup_title_label_, LV_ALIGN_TOP_MID, -12, 0);
+            if (wakeup_icon_label_) {
+                lv_obj_set_style_text_color(wakeup_icon_label_, lv_color_hex(0x4EDEA3), 0);
+                lv_label_set_text(wakeup_icon_label_, MATERIAL_SYMBOLS_ROBOT_2);
+                lv_obj_align_to(wakeup_icon_label_, wakeup_title_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
             }
         }
         if (wakeup_vu_container_) {
@@ -923,14 +960,34 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
         if (wakeup_text_container_) {
             lv_obj_remove_flag(wakeup_text_container_, LV_OBJ_FLAG_HIDDEN);
         }
+
+        // 流式连续拼接：保留前面的句子，平滑展开后续内容
+        if (is_new_assistant_turn_) {
+            assistant_stream_text_ = text;
+            is_new_assistant_turn_ = false;
+        } else {
+            // 如果新接收的句段未包含在流式缓存中，则追加拼接
+            if (assistant_stream_text_.find(text) == std::string::npos) {
+                assistant_stream_text_ += text;
+            }
+        }
+
         if (wakeup_text_label_) {
-            lv_label_set_text(wakeup_text_label_, text.c_str());
+            lv_label_set_text(wakeup_text_label_, assistant_stream_text_.c_str());
+            // 自动向下滚动，保证最新句段呈现在视野中
+            lv_obj_update_layout(wakeup_text_label_);
+            lv_coord_t label_h = lv_obj_get_height(wakeup_text_label_);
+            lv_coord_t cont_h = lv_obj_get_height(wakeup_text_container_);
+            if (label_h > cont_h) {
+                lv_obj_scroll_to_y(wakeup_text_container_, label_h - cont_h, LV_ANIM_ON);
+            }
         }
     }
 }
 
 void CustomLcdDisplay::ClearChatMessages() {
     DisplayLockGuard lock(this);
+    is_new_assistant_turn_ = true;
     // 播报完成/清空：启动 10s 倒计时后退出
     StartAutoHideTimer(10000);
 }

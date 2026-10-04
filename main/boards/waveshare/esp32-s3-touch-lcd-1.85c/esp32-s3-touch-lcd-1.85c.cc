@@ -1,4 +1,5 @@
 #include "application.h"
+#include "assets/lang_config.h"
 #include "button.h"
 #include "codecs/box_audio_codec.h"
 #include "codecs/no_audio_codec.h"
@@ -432,10 +433,43 @@ private:
     void InitializeButtons() {
         boot_button_.OnPressDown([this]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting) {
+            auto state = app.GetDeviceState();
+            auto display = GetDisplay();
+
+            if (state == kDeviceStateStarting) {
                 EnterWifiConfigMode();
                 return;
             }
+
+            // 1. 如果正在播报：按 Boot 键立即打断当前播报，直接转入聆听输入状态！
+            if (state == kDeviceStateSpeaking) {
+                ESP_LOGI(TAG, "Boot button: abort speaking -> start listening");
+                app.AbortSpeaking(kAbortReasonNone);
+                app.StartListening();
+                return;
+            }
+
+            // 2. 如果正在聆听或连接中：用户再次按下 Boot 键，退出全屏语音模式返回桌面！
+            if (state == kDeviceStateListening || state == kDeviceStateConnecting) {
+                ESP_LOGI(TAG, "Boot button: cancel voice mode -> exit to home");
+                app.StopListening();
+                if (display) {
+                    display->SetStatus(Lang::Strings::STANDBY);
+                }
+                app.SetDeviceState(kDeviceStateIdle);
+                return;
+            }
+
+            // 3. 待机空闲状态下：按下瞬间立即呼出全屏 HUD（给用户即时反馈，消除网络握手延迟感）
+            if (state == kDeviceStateIdle) {
+                ESP_LOGI(TAG, "Boot button: instant wake up");
+                if (display) {
+                    display->SetStatus(Lang::Strings::LISTENING);
+                }
+                app.ToggleChatState();
+                return;
+            }
+
             app.ToggleChatState();
         });
 

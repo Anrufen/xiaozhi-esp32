@@ -320,10 +320,10 @@ private:
     void HideWifiConfigOverlay();
 
     lv_obj_t* wakeup_overlay_ = nullptr;        // 360x360 全屏黑底容器
-    lv_obj_t* wakeup_orb_core_ = nullptr;       // 中央能量球核心
-    lv_obj_t* wakeup_orbit_arc_ = nullptr;      // 环绕刻度圈
+    lv_obj_t* led_eye_left_ = nullptr;          // 虚拟 LED 形象左眼
+    lv_obj_t* led_eye_right_ = nullptr;         // 虚拟 LED 形象右眼
     lv_obj_t* wakeup_title_label_ = nullptr;    // “正在聆听” / “小智思考中” / “正在播报”
-    lv_obj_t* wakeup_cursor_ = nullptr;         // 闪烁光标
+    lv_obj_t* wakeup_icon_label_ = nullptr;     // 状态专属 Material 图标
 
     // 动态互斥展示区：频谱 VS 播报文本
     lv_obj_t* wakeup_vu_container_ = nullptr;   // 频谱与分贝容器
@@ -331,6 +331,10 @@ private:
     lv_obj_t* wakeup_db_label_ = nullptr;       // 分贝数值
     lv_obj_t* wakeup_text_container_ = nullptr; // 播报文本透明容器
     lv_obj_t* wakeup_text_label_ = nullptr;     // 文本内容标签
+
+    // 流式连续播报文本拼接缓存
+    std::string assistant_stream_text_;
+    bool is_new_assistant_turn_ = true;
 
     lv_timer_t* wakeup_timer_ = nullptr;        // 40ms 高帧率律动定时器
     esp_timer_handle_t auto_hide_timer_ = nullptr; // 10秒无输入/播报完成自动退出
