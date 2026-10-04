@@ -316,6 +316,8 @@ private:
     void StartCountdown(int seconds = 10);
     void StopCountdown();
     void UpdateCountdownDisplay();
+    const lv_font_t* GetMainTextFont16();
+    bool voice_input_detected_ = false;
 
     // 配网与设备引导界面（WiFi Provisioning Screen）
     void SetupWifiConfigOverlay();
