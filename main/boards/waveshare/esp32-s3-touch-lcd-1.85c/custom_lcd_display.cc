@@ -2113,6 +2113,8 @@ void CustomLcdDisplay::ShowPlayerPage() {
     }
     UpdateIndicator(-1);
     SetPlayerAnimationActive(is_playing_);
+    // 进入播放器页面时自动在后台扫描可用的 DLNA 设备并缓存（非强制刷新，防抖防频繁触发）
+    ScanDlnaDevices(false);
 #else
     ShowHomePage();
 #endif
@@ -2317,29 +2319,12 @@ void CustomLcdDisplay::EnsurePlayerUI() {
     };
     lv_obj_add_event_cb(player_overlay_, on_player_gesture, LV_EVENT_GESTURE, this);
 
-    // 2. 顶部微光投播胶囊按键 (居中, y: 12, 宽 210, 高 26，圆角 13，绝不超出圆屏视窗)
-    player_cast_btn_ = lv_btn_create(player_overlay_);
-    lv_obj_set_size(player_cast_btn_, 210, 26);
-    lv_obj_set_style_radius(player_cast_btn_, 13, 0);
-    lv_obj_set_style_bg_color(player_cast_btn_, lv_color_hex(0x131D2E), 0);
-    lv_obj_set_style_border_color(player_cast_btn_, lv_color_hex(0x00E5FF), 0);
-    lv_obj_set_style_border_width(player_cast_btn_, 1, 0);
-    lv_obj_set_style_pad_all(player_cast_btn_, 0, 0);
-    lv_obj_align(player_cast_btn_, LV_ALIGN_TOP_MID, 0, 12);
-
-    player_header_label_ = lv_label_create(player_cast_btn_);
+    // 2. 顶部微光标题 (y: 20，恢复原版 Navidrome 极客文字排版，无边框遮挡)
+    player_header_label_ = lv_label_create(player_overlay_);
     lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0x38BDF8), 0);
     lv_obj_set_style_text_font(player_header_label_, GetMainTextFont16(), 0);
-    lv_label_set_text(player_header_label_, "♪ 本机播放 ▾");
-    lv_obj_align(player_header_label_, LV_ALIGN_CENTER, 0, 0);
-
-    lv_obj_add_event_cb(
-        player_cast_btn_,
-        [](lv_event_t* e) {
-            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
-            self->ShowCastModal();
-        },
-        LV_EVENT_CLICKED, this);
+    lv_label_set_text(player_header_label_, "♪ 本机播放");
+    lv_obj_align(player_header_label_, LV_ALIGN_TOP_MID, 0, 20);
 
     // 3. 中间黑胶唱片与环形进度条区 (y: 44, w: 172, h: 172)
     lv_obj_t* disc_box = lv_obj_create(player_overlay_);
@@ -2367,6 +2352,7 @@ void CustomLcdDisplay::EnsurePlayerUI() {
     lv_obj_remove_flag(player_arc_, LV_OBJ_FLAG_CLICKABLE);
 
     // 黑胶唱片本体 (直径 134px，深邃黑胶质感，边缘高光)
+    // 同心圆正中央增加触控交互：单击切换播放设备（本机 / 局域网各 DLNA 设备）
     lv_obj_t* vinyl = lv_obj_create(disc_box);
     lv_obj_set_size(vinyl, 134, 134);
     lv_obj_align(vinyl, LV_ALIGN_CENTER, 0, 0);
@@ -2375,7 +2361,15 @@ void CustomLcdDisplay::EnsurePlayerUI() {
     lv_obj_set_style_border_color(vinyl, lv_color_hex(0x1E293B), 0);
     lv_obj_set_style_border_width(vinyl, 2, 0);
     lv_obj_set_style_pad_all(vinyl, 0, 0);
-    lv_obj_remove_flag(vinyl, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(vinyl, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_add_event_cb(
+        vinyl,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->OnVinylClicked();
+        },
+        LV_EVENT_CLICKED, this);
 
     // 移掉原先正中央的圆环限制，直接在唱片核心舒展大尺寸宽幅律动声谱
     // 宽 116px, 高 58px，13 根律动跳柱
@@ -2557,32 +2551,21 @@ void CustomLcdDisplay::UpdatePlayerUI() {
     int target_idx = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
     if (target_idx >= 0) {
         std::string dev_name = waveshare185c::DlnaController::GetInstance().GetTargetName();
-        if (dev_name.size() > 16) {
-            dev_name = dev_name.substr(0, 16) + "..";
+        if (dev_name.size() > 14) {
+            dev_name = dev_name.substr(0, 14) + "..";
         }
         snprintf(hdr_buf, sizeof(hdr_buf), "♪ 0%d/0%d · 投播: %s", (int)(current_track_idx_ + 1),
                  (int)playlist_.size(), dev_name.c_str());
     } else {
-        snprintf(hdr_buf, sizeof(hdr_buf), "♪ 0%d/0%d · %s", (int)(current_track_idx_ + 1),
-                 (int)playlist_.size(), track.source.c_str());
+        snprintf(hdr_buf, sizeof(hdr_buf), "♪ 0%d/0%d · 本机播放", (int)(current_track_idx_ + 1),
+                 (int)playlist_.size());
     }
     if (player_header_label_) {
         lv_label_set_text(player_header_label_, hdr_buf);
-    }
-
-    if (player_cast_btn_) {
         if (target_idx >= 0) {
-            lv_obj_set_style_bg_color(player_cast_btn_, lv_color_hex(0x0284C7), 0);
-            lv_obj_set_style_border_color(player_cast_btn_, lv_color_hex(0x38BDF8), 0);
-            if (player_header_label_) {
-                lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0xFFFFFF), 0);
-            }
+            lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0x00E5FF), 0);
         } else {
-            lv_obj_set_style_bg_color(player_cast_btn_, lv_color_hex(0x131D2E), 0);
-            lv_obj_set_style_border_color(player_cast_btn_, lv_color_hex(0x00E5FF), 0);
-            if (player_header_label_) {
-                lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0x38BDF8), 0);
-            }
+            lv_obj_set_style_text_color(player_header_label_, lv_color_hex(0x38BDF8), 0);
         }
     }
 
@@ -2898,176 +2881,22 @@ void CustomLcdDisplay::OnPlayerNextClicked() {
     UpdatePlayerUI();
 }
 
-void CustomLcdDisplay::ShowCastModal() {
-    if (cast_modal_) {
-        HideCastModal();
-    }
-
-    cast_modal_ = lv_obj_create(player_overlay_);
-    lv_obj_set_size(cast_modal_, 268, 240);
-    lv_obj_align(cast_modal_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(cast_modal_, lv_color_hex(0x0B0F19), 0);
-    lv_obj_set_style_bg_opa(cast_modal_, LV_OPA_90, 0);
-    lv_obj_set_style_border_color(cast_modal_, lv_color_hex(0x00E5FF), 0);
-    lv_obj_set_style_border_width(cast_modal_, 1, 0);
-    lv_obj_set_style_radius(cast_modal_, 18, 0);
-    lv_obj_set_style_pad_all(cast_modal_, 8, 0);
-    lv_obj_remove_flag(cast_modal_, LV_OBJ_FLAG_SCROLLABLE);
-
-    // 模态框顶部：标题与关闭按钮
-    lv_obj_t* title = lv_label_create(cast_modal_);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(title, GetMainTextFont16(), 0);
-    lv_label_set_text(title, "设备投播 (Cast)");
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 12, 8);
-
-    lv_obj_t* close_btn = lv_btn_create(cast_modal_);
-    lv_obj_set_size(close_btn, 26, 26);
-    lv_obj_set_style_radius(close_btn, 13, 0);
-    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x1E293B), 0);
-    lv_obj_set_style_border_width(close_btn, 0, 0);
-    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -8, 4);
-    lv_obj_t* close_lbl = lv_label_create(close_btn);
-    lv_label_set_text(close_lbl, "✕");
-    lv_obj_set_style_text_color(close_lbl, lv_color_hex(0x94A3B8), 0);
-    lv_obj_align(close_lbl, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_event_cb(
-        close_btn,
-        [](lv_event_t* e) {
-            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
-            self->HideCastModal();
-        },
-        LV_EVENT_CLICKED, this);
-
-    // 中间设备列表滚动容器
-    cast_list_cont_ = lv_obj_create(cast_modal_);
-    lv_obj_set_size(cast_list_cont_, 244, 140);
-    lv_obj_align(cast_list_cont_, LV_ALIGN_TOP_MID, 0, 38);
-    lv_obj_set_style_bg_opa(cast_list_cont_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(cast_list_cont_, 0, 0);
-    lv_obj_set_style_pad_all(cast_list_cont_, 0, 0);
-    lv_obj_set_flex_flow(cast_list_cont_, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(cast_list_cont_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(cast_list_cont_, 6, 0);
-
-    // 底部“扫描局域网设备”按钮
-    lv_obj_t* refresh_btn = lv_btn_create(cast_modal_);
-    lv_obj_set_size(refresh_btn, 140, 30);
-    lv_obj_set_style_radius(refresh_btn, 15, 0);
-    lv_obj_set_style_bg_color(refresh_btn, lv_color_hex(0x1E293B), 0);
-    lv_obj_set_style_border_color(refresh_btn, lv_color_hex(0x38BDF8), 0);
-    lv_obj_set_style_border_width(refresh_btn, 1, 0);
-    lv_obj_align(refresh_btn, LV_ALIGN_BOTTOM_MID, 0, -4);
-    lv_obj_t* ref_lbl = lv_label_create(refresh_btn);
-    lv_obj_set_style_text_font(ref_lbl, GetMainTextFont16(), 0);
-    lv_obj_set_style_text_color(ref_lbl, lv_color_hex(0x38BDF8), 0);
-    lv_label_set_text(ref_lbl, "扫描局域网设备");
-    lv_obj_align(ref_lbl, LV_ALIGN_CENTER, 0, 0);
-
-    lv_obj_add_event_cb(
-        refresh_btn,
-        [](lv_event_t* e) {
-            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
-            self->ScanDlnaDevices();
-        },
-        LV_EVENT_CLICKED, this);
-
-    UpdateCastModalDeviceList();
-
-    // 自动触发一次局域网设备扫描
-    ScanDlnaDevices();
-}
-
-void CustomLcdDisplay::HideCastModal() {
-    if (cast_modal_) {
-        lv_obj_del(cast_modal_);
-        cast_modal_ = nullptr;
-        cast_list_cont_ = nullptr;
-    }
-}
-
-void CustomLcdDisplay::UpdateCastModalDeviceList() {
-    if (!cast_list_cont_) {
+void CustomLcdDisplay::OnVinylClicked() {
+    auto& dlna = waveshare185c::DlnaController::GetInstance();
+    auto devs = dlna.GetDevices();
+    if (devs.empty()) {
+        ESP_LOGI(TAG, "Vinyl clicked: no DLNA devices cached, initiating background scan");
+        ScanDlnaDevices(true);
+        if (player_header_label_) {
+            lv_label_set_text(player_header_label_, "♪ 正在搜索局域网设备...");
+        }
         return;
     }
 
-    lv_obj_clean(cast_list_cont_);
-
-    int current_target = waveshare185c::DlnaController::GetInstance().GetTargetIndex();
-    auto devices = waveshare185c::DlnaController::GetInstance().GetDevices();
-
-    // 1. 本地扬声器选项 (target_idx = -1)
-    lv_obj_t* local_btn = lv_btn_create(cast_list_cont_);
-    lv_obj_set_size(local_btn, 236, 36);
-    lv_obj_set_style_radius(local_btn, 8, 0);
-    if (current_target == -1) {
-        lv_obj_set_style_bg_color(local_btn, lv_color_hex(0x0284C7), 0);
-        lv_obj_set_style_border_color(local_btn, lv_color_hex(0x38BDF8), 0);
-        lv_obj_set_style_border_width(local_btn, 1, 0);
-    } else {
-        lv_obj_set_style_bg_color(local_btn, lv_color_hex(0x1E293B), 0);
-        lv_obj_set_style_border_width(local_btn, 0, 0);
-    }
-    lv_obj_t* local_lbl = lv_label_create(local_btn);
-    lv_obj_set_style_text_font(local_lbl, GetMainTextFont16(), 0);
-    lv_obj_set_style_text_color(local_lbl, lv_color_hex(0xFFFFFF), 0);
-    lv_label_set_text(local_lbl, current_target == -1 ? "✓ 本机扬声器 (当前)" : "  本机扬声器");
-    lv_obj_align(local_lbl, LV_ALIGN_LEFT_MID, 10, 0);
-
-    lv_obj_add_event_cb(
-        local_btn,
-        [](lv_event_t* e) {
-            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
-            self->SwitchPlaybackTarget(-1);
-            self->HideCastModal();
-        },
-        LV_EVENT_CLICKED, this);
-
-    // 2. 局域网各 DLNA 设备
-    for (size_t i = 0; i < devices.size(); ++i) {
-        lv_obj_t* dev_btn = lv_btn_create(cast_list_cont_);
-        lv_obj_set_size(dev_btn, 236, 36);
-        lv_obj_set_style_radius(dev_btn, 8, 0);
-        if (current_target == (int)i) {
-            lv_obj_set_style_bg_color(dev_btn, lv_color_hex(0x0284C7), 0);
-            lv_obj_set_style_border_color(dev_btn, lv_color_hex(0x38BDF8), 0);
-            lv_obj_set_style_border_width(dev_btn, 1, 0);
-        } else {
-            lv_obj_set_style_bg_color(dev_btn, lv_color_hex(0x1E293B), 0);
-            lv_obj_set_style_border_width(dev_btn, 0, 0);
-        }
-
-        lv_obj_t* dev_lbl = lv_label_create(dev_btn);
-        lv_obj_set_style_text_font(dev_lbl, GetMainTextFont16(), 0);
-        lv_obj_set_style_text_color(dev_lbl, lv_color_hex(0xFFFFFF), 0);
-
-        std::string label_text = (current_target == (int)i ? "✓ " : "  ") + devices[i].name;
-        if (label_text.size() > 24) {
-            label_text = label_text.substr(0, 24) + "..";
-        }
-        lv_label_set_text(dev_lbl, label_text.c_str());
-        lv_obj_align(dev_lbl, LV_ALIGN_LEFT_MID, 10, 0);
-
-        lv_obj_set_user_data(dev_btn, (void*)(intptr_t)i);
-        lv_obj_add_event_cb(
-            dev_btn,
-            [](lv_event_t* e) {
-                auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
-                lv_obj_t* btn = (lv_obj_t*)lv_event_get_target(e);
-                int dev_idx = (int)(intptr_t)lv_obj_get_user_data(btn);
-                self->SwitchPlaybackTarget(dev_idx);
-                self->HideCastModal();
-            },
-            LV_EVENT_CLICKED, this);
-    }
-
-    if (devices.empty()) {
-        lv_obj_t* hint = lv_label_create(cast_list_cont_);
-        lv_obj_set_style_text_font(hint, GetMainTextFont16(), 0);
-        lv_obj_set_style_text_color(hint, lv_color_hex(0x64748B), 0);
-        lv_label_set_text(hint, "正在探测局域网设备...");
-    }
+    int next_target = dlna.CycleNextTarget();
+    std::string target_name = dlna.GetTargetName();
+    ESP_LOGI(TAG, "Vinyl clicked: switched target to %d (%s)", next_target, target_name.c_str());
+    SwitchPlaybackTarget(next_target);
 }
 
 void CustomLcdDisplay::SwitchPlaybackTarget(int target_idx) {
@@ -3110,14 +2939,12 @@ std::string CustomLcdDisplay::GetTrackDirectUrl(size_t track_idx, bool for_dlna)
         navidrome_server_, track.id, navidrome_user_, navidrome_pass_, for_dlna);
 }
 
-void CustomLcdDisplay::ScanDlnaDevices() {
+void CustomLcdDisplay::ScanDlnaDevices(bool force) {
     waveshare185c::DlnaController::GetInstance().StartDiscovery(
         [this](const std::vector<waveshare185c::DlnaDevice>&) {
-            if (this->cast_modal_ && this->cast_list_cont_) {
-                this->UpdateCastModalDeviceList();
-            }
             this->UpdatePlayerUI();
-        });
+        },
+        force);
 }
 
 std::vector<waveshare185c::DlnaDevice> CustomLcdDisplay::GetDlnaDevices() const {

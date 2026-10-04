@@ -709,7 +709,6 @@ private:
                 }
                 bool ok = waveshare185c::DlnaController::GetInstance().ProbeAndAddDevice(host);
                 if (ok) {
-                    display_->UpdateCastModalDeviceList();
                     display_->UpdatePlayerUI();
                     return std::string("Device successfully probed and added to list");
                 }

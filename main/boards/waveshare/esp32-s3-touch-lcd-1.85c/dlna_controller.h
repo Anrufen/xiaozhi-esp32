@@ -22,7 +22,8 @@ public:
     static DlnaController& GetInstance();
 
     // 启动 SSDP 局域网设备扫描（后台异步任务）
-    void StartDiscovery(DeviceListCallback on_update = nullptr);
+    // force = false 时，如果 60 秒内已扫描过并缓存有设备，直接返回缓存，不重复发包
+    void StartDiscovery(DeviceListCallback on_update = nullptr, bool force = false);
 
     // 获取当前发现的所有有效 DLNA 渲染器
     std::vector<DlnaDevice> GetDevices() const;
@@ -34,6 +35,9 @@ public:
     void SetTargetIndex(int index);
     int GetTargetIndex() const;
     std::string GetTargetName() const;
+
+    // 循环切换到下一个播放设备：-1(本机) -> 0 -> 1 -> ... -> -1(本机)
+    int CycleNextTarget();
 
     // 对指定设备或当前选定设备进行控制
     bool Play(int device_idx, const std::string& media_url, const std::string& title = "",
@@ -66,6 +70,7 @@ private:
     std::vector<DlnaDevice> devices_;
     int target_index_ = -1;  // 默认 -1: 本地扬声器播放
     bool is_scanning_ = false;
+    int64_t last_scan_time_ms_ = 0;
     DeviceListCallback on_update_cb_ = nullptr;
 };
 

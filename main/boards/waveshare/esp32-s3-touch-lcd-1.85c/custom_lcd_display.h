@@ -115,15 +115,13 @@ public:
     std::string GetCurrentTrackDirectUrl(bool for_dlna = true);
     std::string GetTrackDirectUrl(size_t track_idx, bool for_dlna = true);
     void SwitchPlaybackTarget(int target_idx);
-    void ScanDlnaDevices();
+    void ScanDlnaDevices(bool force = false);
+    void OnVinylClicked();
     std::vector<waveshare185c::DlnaDevice> GetDlnaDevices() const;
     int GetCurrentPlaybackTarget() const;
     std::string GetCurrentPlaybackTargetName() const;
 
-    // 投播弹窗控制与 UI 刷新
-    void ShowCastModal();
-    void HideCastModal();
-    void UpdateCastModalDeviceList();
+    // UI 刷新
     void UpdatePlayerUI();
 #endif
 
@@ -267,12 +265,6 @@ private:
     size_t current_track_idx_ = 0;
     bool is_playing_ = false;
     uint32_t play_elapsed_sec_ = 0;
-
-    // 投播 UI 元素
-    lv_obj_t* player_cast_btn_ = nullptr;
-    lv_obj_t* player_cast_label_ = nullptr;
-    lv_obj_t* cast_modal_ = nullptr;
-    lv_obj_t* cast_list_cont_ = nullptr;
 #else
     inline void SetPlayerAnimationActive(bool /*active*/) {}
 #endif
