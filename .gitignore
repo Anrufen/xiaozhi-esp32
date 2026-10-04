@@ -7,6 +7,10 @@ dist/
 .devcontainer/
 sdkconfig.old
 sdkconfig
+sdkconfig.override
+sdkconfig.override.*
+!*.example
+secret_scan_patterns.txt
 dependencies.lock
 .env
 releases/
@@ -18,3 +22,5 @@ main/mmap_generate_emoji.h
 *.bin
 mmap_generate_*.h
 .clangd
+*.log
+compile_commands.json

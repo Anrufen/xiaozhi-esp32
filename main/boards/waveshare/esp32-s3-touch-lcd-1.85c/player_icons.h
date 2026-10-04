@@ -118,8 +118,6 @@ static const lv_image_dsc_t img_player_play_arrow = {
     },
     .data_size = sizeof(player_icon_play_map),
     .data = player_icon_play_map,
-    .reserved = NULL,
-    .reserved_2 = NULL,
 };
 
 static const uint8_t player_icon_pause_map[] = {
@@ -237,8 +235,6 @@ static const lv_image_dsc_t img_player_pause = {
     },
     .data_size = sizeof(player_icon_pause_map),
     .data = player_icon_pause_map,
-    .reserved = NULL,
-    .reserved_2 = NULL,
 };
 
 #endif // PLAYER_ICONS_H

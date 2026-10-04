@@ -1,0 +1,17 @@
+# Waveshare ESP32-S3 Touch LCD 1.85C 本地个人默认值覆盖模板
+# 复制此文件至工程根目录命名为 sdkconfig.override，编译时脚本会自动叠加此配置。
+# 注意：该文件不得提交至版本库，严禁包含真实个人密码。
+
+# Navidrome 扩展服务配置
+CONFIG_WS185C_ENABLE_NAVIDROME=y
+CONFIG_WS185C_NAVIDROME_URL="http://192.168.1.100:4533"
+CONFIG_WS185C_NAVIDROME_USER="your_username"
+CONFIG_WS185C_NAVIDROME_PASS="your_password"
+
+# Beszel VPS 监控 Hub 服务配置
+CONFIG_WS185C_ENABLE_BESZEL=y
+CONFIG_WS185C_BESZEL_URL="http://192.168.1.100:8090"
+CONFIG_WS185C_BESZEL_USER="your_email@example.com"
+CONFIG_WS185C_BESZEL_PASS="your_password"
+CONFIG_WS185C_BESZEL_FETCH_INTERVAL=15
+CONFIG_WS185C_BESZEL_CAROUSEL_INTERVAL=5

@@ -1,5 +1,4 @@
 #include "custom_lcd_display.h"
-#include "player_icons.h"
 #include <material_symbols.h>
 #include "application.h"
 #include "assets/lang_config.h"
@@ -7,19 +6,21 @@
 #include "board.h"
 #include "config.h"
 #include "lvgl_theme.h"
+#include "player_icons.h"
 #include "wifi_manager.h"
 
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <cJSON.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <cJSON.h>
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <vector>
 
 #define TAG "CustomLcdDisplay"
+using waveshare185c::ServiceConfig;
 
 // 编译期常驻 Flash ROData 的大号与小号字体
 LV_FONT_DECLARE(font_maison_neue_book_14);
@@ -31,25 +32,50 @@ LV_FONT_DECLARE(font_material_symbols_16_4);
 LV_FONT_DECLARE(font_material_symbols_30_4);
 
 // 走势图采样点（宽幅展开至 260px，高 26px）
-static const lv_point_precise_t kSparklinePoints[] = {
-    {0, 20}, {36, 17}, {74, 22}, {112, 14}, {150, 16}, {188, 8}, {226, 12}, {260, 4}
-};
+static const lv_point_precise_t kSparklinePoints[] = {{0, 20},   {36, 17}, {74, 22},  {112, 14},
+                                                      {150, 16}, {188, 8}, {226, 12}, {260, 4}};
 
 CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
                                    int width, int height, int offset_x, int offset_y, bool mirror_x,
                                    bool mirror_y, bool swap_xy)
     : SpiLcdDisplay(panel_io, panel, width, height, offset_x, offset_y, mirror_x, mirror_y,
-                    swap_xy) {}
+                    swap_xy) {
+    service_config_ = waveshare185c::CreateDefaultServiceConfig();
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (service_config_) {
+        auto navi = service_config_->GetNavidromeConfig();
+        navidrome_server_ = navi.url;
+        navidrome_user_ = navi.user;
+        navidrome_pass_ = navi.pass;
+        navidrome_status_ =
+            navi.IsConfigured() ? ServiceStatus::kConnected : ServiceStatus::kUnconfigured;
+    }
+#endif
+#if CONFIG_WS185C_ENABLE_BESZEL
+    if (service_config_) {
+        auto bsz = service_config_->GetBeszelConfig();
+        beszel_hub_url_ = bsz.url;
+        beszel_user_ = bsz.user;
+        beszel_pass_ = bsz.pass;
+        beszel_fetch_interval_s_ = bsz.fetch_interval_s;
+        beszel_rotate_interval_s_ = bsz.rotate_interval_s;
+        beszel_status_ =
+            bsz.IsConfigured() ? ServiceStatus::kConnected : ServiceStatus::kUnconfigured;
+    }
+#endif
+}
 
 CustomLcdDisplay::~CustomLcdDisplay() {
     if (clock_timer_) {
         lv_timer_delete(clock_timer_);
         clock_timer_ = nullptr;
     }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
     if (player_anim_timer_) {
         lv_timer_delete(player_anim_timer_);
         player_anim_timer_ = nullptr;
     }
+#endif
 }
 
 void CustomLcdDisplay::SetupUI() {
@@ -120,6 +146,7 @@ void CustomLcdDisplay::SetupUI() {
     lv_obj_set_scrollbar_mode(indicator_container_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_remove_flag(indicator_container_, LV_OBJ_FLAG_SCROLLABLE);
 
+#if CONFIG_WS185C_ENABLE_NAVIDROME
     dot_player_ = lv_obj_create(indicator_container_);
     lv_obj_set_size(dot_player_, 6, 5);
     lv_obj_set_style_radius(dot_player_, 3, 0);
@@ -133,6 +160,7 @@ void CustomLcdDisplay::SetupUI() {
             self->ShowPlayerPage();
         },
         LV_EVENT_CLICKED, this);
+#endif
 
     dot_home_ = lv_obj_create(indicator_container_);
     lv_obj_set_size(dot_home_, 18, 5);
@@ -174,27 +202,53 @@ void CustomLcdDisplay::SetupUI() {
         if (self->current_page_ == 0) {
             if (dir == LV_DIR_LEFT) {
                 self->ShowWeatherPage();
+#if CONFIG_WS185C_ENABLE_NAVIDROME
             } else if (dir == LV_DIR_RIGHT) {
                 self->ShowPlayerPage();
+#endif
             } else if (dir == LV_DIR_BOTTOM) {
                 self->ShowSettingsPage();
+#if CONFIG_WS185C_ENABLE_BESZEL
+            } else if (dir == LV_DIR_TOP) {
+                self->ShowServerPage();
+#endif
             }
         } else if (self->current_page_ == 1) {
             if (dir == LV_DIR_RIGHT) {
                 self->ShowHomePage();
             } else if (dir == LV_DIR_BOTTOM) {
                 self->ShowSettingsPage();
+#if CONFIG_WS185C_ENABLE_BESZEL
+            } else if (dir == LV_DIR_TOP) {
+                self->ShowServerPage();
+#endif
             }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
         } else if (self->current_page_ == -1) {
             if (dir == LV_DIR_LEFT) {
                 self->ShowHomePage();
             } else if (dir == LV_DIR_BOTTOM) {
                 self->ShowSettingsPage();
+#if CONFIG_WS185C_ENABLE_BESZEL
+            } else if (dir == LV_DIR_TOP) {
+                self->ShowServerPage();
+#endif
             }
+#endif
         } else if (self->current_page_ == 2) {
             if (dir == LV_DIR_TOP) {
                 self->ShowHomePage();
             }
+#if CONFIG_WS185C_ENABLE_BESZEL
+        } else if (self->current_page_ == 3) {
+            if (dir == LV_DIR_BOTTOM) {
+                self->ShowHomePage();
+            } else if (dir == LV_DIR_LEFT) {
+                self->NextVpsNode();
+            } else if (dir == LV_DIR_RIGHT) {
+                self->PrevVpsNode();
+            }
+#endif
         }
     };
 
@@ -211,6 +265,7 @@ void CustomLcdDisplay::SetupUI() {
             if (self->weather_ui_created_) {
                 self->UpdateWeatherClock();
             }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
             if (self->is_playing_ && self->player_ui_created_ && !self->playlist_.empty()) {
                 self->play_elapsed_sec_++;
                 const auto& cur_track = self->playlist_[self->current_track_idx_];
@@ -220,6 +275,7 @@ void CustomLcdDisplay::SetupUI() {
                     self->UpdatePlayerUI();
                 }
             }
+#endif
             self->CheckAndTriggerStockFetch();
             self->CheckAndTriggerWeatherFetch();
         },
@@ -336,8 +392,7 @@ void CustomLcdDisplay::SetupHomeDashboardUI() {
     lv_obj_set_style_border_width(time_row, 0, 0);
     lv_obj_set_style_pad_all(time_row, 0, 0);
     lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END,
-                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(time_row, 6, 0);
     lv_obj_remove_flag(time_row, LV_OBJ_FLAG_CLICKABLE);
 
@@ -452,13 +507,16 @@ void CustomLcdDisplay::SetupHomeDashboardUI() {
 
     // 初始化默认 5 支股票轮播列表（开箱即用）
     if (stock_list_.empty()) {
-        stock_list_ = {
-            {"00992.HK", "联想集团", "LNVGY", "HK$ ", "34.32", "-0.64% (-0.22)", "(-0.22)", "33.74 - 35.24", "42.8M", false, true, true},
-            {"NVDA", "英伟达", "NVDA", "$ ", "230.86", "+1.09% (+2.48)", "(+2.48)", "228.16 - 232.29", "98.5M", true, false, true},
-            {"QQQ", "纳指100", "QQQ", "$ ", "742.03", "+0.31% (+2.26)", "(+2.26)", "736.25 - 744.67", "35.7M", true, false, true},
-            {"AAPL", "苹果", "AAPL", "$ ", "330.32", "-0.81% (-2.70)", "(-2.70)", "325.81 - 332.48", "36.3M", false, true, true},
-            {"GOOGL", "谷歌", "GOOGL", "$ ", "338.24", "-1.70% (-5.84)", "(-5.84)", "335.51 - 353.22", "33.2M", false, true, true}
-        };
+        stock_list_ = {{"00992.HK", "联想集团", "LNVGY", "HK$ ", "34.32", "-0.64% (-0.22)",
+                        "(-0.22)", "33.74 - 35.24", "42.8M", false, true, true},
+                       {"NVDA", "英伟达", "NVDA", "$ ", "230.86", "+1.09% (+2.48)", "(+2.48)",
+                        "228.16 - 232.29", "98.5M", true, false, true},
+                       {"QQQ", "纳指100", "QQQ", "$ ", "742.03", "+0.31% (+2.26)", "(+2.26)",
+                        "736.25 - 744.67", "35.7M", true, false, true},
+                       {"AAPL", "苹果", "AAPL", "$ ", "330.32", "-0.81% (-2.70)", "(-2.70)",
+                        "325.81 - 332.48", "36.3M", false, true, true},
+                       {"GOOGL", "谷歌", "GOOGL", "$ ", "338.24", "-1.70% (-5.84)", "(-5.84)",
+                        "335.51 - 353.22", "33.2M", false, true, true}};
     }
     ApplyStockUI(stock_list_[0]);
 
@@ -477,12 +535,18 @@ void CustomLcdDisplay::UpdateHomeClock() {
             // 配网模式：隐藏股票看板与播放器，显露基类表情与提示，显示基类状态栏
             if (home_dashboard_)
                 lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
+#if CONFIG_WS185C_ENABLE_NAVIDROME
             if (player_overlay_)
                 lv_obj_add_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
+#endif
             if (weather_overlay_)
                 lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
             if (settings_overlay_)
                 lv_obj_add_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
+#if CONFIG_WS185C_ENABLE_BESZEL
+            if (server_overlay_)
+                lv_obj_add_flag(server_overlay_, LV_OBJ_FLAG_HIDDEN);
+#endif
             if (emoji_label_)
                 lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
             if (status_bar_)
@@ -522,8 +586,8 @@ void CustomLcdDisplay::UpdateHomeClock() {
                                                   "星期四", "星期五", "星期六"};
         static const char* const weekdays_en[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
         char date_buf[64];
-        snprintf(date_buf, sizeof(date_buf), "%d月%d日 · %s (%s)", tm_now->tm_mon + 1, tm_now->tm_mday,
-                 weekdays_cn[tm_now->tm_wday], weekdays_en[tm_now->tm_wday]);
+        snprintf(date_buf, sizeof(date_buf), "%d月%d日 · %s (%s)", tm_now->tm_mon + 1,
+                 tm_now->tm_mday, weekdays_cn[tm_now->tm_wday], weekdays_en[tm_now->tm_wday]);
         lv_label_set_text(home_date_label_, date_buf);
     }
 
@@ -535,6 +599,23 @@ void CustomLcdDisplay::UpdateHomeClock() {
             ApplyStockUI(stock_list_[current_stock_idx_]);
         }
     }
+
+#if CONFIG_WS185C_ENABLE_BESZEL
+    // VPS 自动轮播：根据缓存的配置间隔轮播（免每秒读 NVS）
+    if (!vps_nodes_.empty()) {
+        int rotate_interval = beszel_rotate_interval_s_ > 0 ? beszel_rotate_interval_s_ : 5;
+        if (++vps_carousel_counter_ >= (uint32_t)rotate_interval) {
+            vps_carousel_counter_ = 0;
+            current_vps_idx_ = (current_vps_idx_ + 1) % vps_nodes_.size();
+            if (current_page_ == 3 && server_ui_created_) {
+                UpdateServerUI();
+            }
+        }
+    }
+
+    // 定期检查并后台拉取 Beszel 最新数据
+    CheckAndTriggerServerFetch();
+#endif
 }
 
 void CustomLcdDisplay::CheckAndTriggerStockFetch() {
@@ -768,7 +849,8 @@ void CustomLcdDisplay::EnsureWeatherUI() {
     lv_obj_set_style_border_width(cond_box, 0, 0);
     lv_obj_set_style_pad_all(cond_box, 0, 0);
     lv_obj_set_flex_flow(cond_box, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(cond_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(cond_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(cond_box, 10, 0);
     lv_obj_remove_flag(cond_box, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -829,7 +911,8 @@ void CustomLcdDisplay::EnsureWeatherUI() {
     lv_obj_set_style_radius(trio_box, 10, 0);
     lv_obj_set_style_pad_all(trio_box, 4, 0);
     lv_obj_set_flex_flow(trio_box, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(trio_box, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(trio_box, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(trio_box, LV_OBJ_FLAG_SCROLLABLE);
 
     // 指标1：2级 + 速度 (移除汉字“风向”)
@@ -840,7 +923,8 @@ void CustomLcdDisplay::EnsureWeatherUI() {
     lv_obj_set_style_radius(item1, 6, 0);
     lv_obj_set_style_pad_all(item1, 4, 0);
     lv_obj_set_flex_flow(item1, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(item1, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(item1, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(item1, LV_OBJ_FLAG_SCROLLABLE);
 
     weather_wind_val_ = lv_label_create(item1);
@@ -861,7 +945,8 @@ void CustomLcdDisplay::EnsureWeatherUI() {
     lv_obj_set_style_radius(item2, 6, 0);
     lv_obj_set_style_pad_all(item2, 4, 0);
     lv_obj_set_flex_flow(item2, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(item2, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(item2, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(item2, LV_OBJ_FLAG_SCROLLABLE);
 
     weather_uv_val_ = lv_label_create(item2);
@@ -881,7 +966,8 @@ void CustomLcdDisplay::EnsureWeatherUI() {
     lv_obj_set_style_radius(item3, 6, 0);
     lv_obj_set_style_pad_all(item3, 4, 0);
     lv_obj_set_flex_flow(item3, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(item3, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(item3, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(item3, LV_OBJ_FLAG_SCROLLABLE);
 
     weather_pres_val_ = lv_label_create(item3);
@@ -902,7 +988,8 @@ void CustomLcdDisplay::EnsureWeatherUI() {
     lv_obj_set_style_border_width(fore_box, 0, 0);
     lv_obj_set_style_pad_all(fore_box, 0, 0);
     lv_obj_set_flex_flow(fore_box, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(fore_box, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(fore_box, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(fore_box, LV_OBJ_FLAG_SCROLLABLE);
 
     // 时段 1 (w: 90, h: 88，充足高度，时间标签绝无遮挡)
@@ -918,7 +1005,8 @@ void CustomLcdDisplay::EnsureWeatherUI() {
     lv_obj_set_style_pad_left(f1, 4, 0);
     lv_obj_set_style_pad_right(f1, 4, 0);
     lv_obj_set_flex_flow(f1, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(f1, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(f1, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(f1, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* f1_time = lv_label_create(f1);
@@ -969,7 +1057,8 @@ void CustomLcdDisplay::EnsureWeatherUI() {
     lv_obj_set_style_pad_left(f2, 4, 0);
     lv_obj_set_style_pad_right(f2, 4, 0);
     lv_obj_set_flex_flow(f2, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(f2, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(f2, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(f2, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* f2_time = lv_label_create(f2);
@@ -1019,7 +1108,8 @@ void CustomLcdDisplay::EnsureWeatherUI() {
     lv_obj_set_style_pad_left(f3, 4, 0);
     lv_obj_set_style_pad_right(f3, 4, 0);
     lv_obj_set_flex_flow(f3, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(f3, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(f3, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(f3, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* f3_time = lv_label_create(f3);
@@ -1081,11 +1171,7 @@ void CustomLcdDisplay::UpdateWeatherHourlyForecast() {
         cur_h = 12;
     }
 
-    int hours[3] = {
-        cur_h,
-        (cur_h + 3) % 24,
-        (cur_h + 6) % 24
-    };
+    int hours[3] = {cur_h, (cur_h + 3) % 24, (cur_h + 6) % 24};
 
     // 第 0 个时段（当前时间）为高亮选中态，其余为暗色常规态
     for (int i = 0; i < 3; ++i) {
@@ -1158,27 +1244,33 @@ void CustomLcdDisplay::UpdateWeatherLabels() {
     UpdateWeatherHourlyForecast();
 }
 
-void CustomLcdDisplay::UpdateWeatherClock() {
-    UpdateWeatherHourlyForecast();
-}
+void CustomLcdDisplay::UpdateWeatherClock() { UpdateWeatherHourlyForecast(); }
 
 void CustomLcdDisplay::UpdateIndicator(int active_page) {
+#if CONFIG_WS185C_ENABLE_NAVIDROME
     if (!dot_player_ || !dot_home_ || !dot_weather_)
         return;
 
     // 全部重置为 6px 暗灰色微圆点
     lv_obj_set_size(dot_player_, 6, 5);
     lv_obj_set_style_bg_color(dot_player_, lv_color_hex(0x31353E), 0);
+#else
+    if (!dot_home_ || !dot_weather_)
+        return;
+#endif
     lv_obj_set_size(dot_home_, 6, 5);
     lv_obj_set_style_bg_color(dot_home_, lv_color_hex(0x31353E), 0);
     lv_obj_set_size(dot_weather_, 6, 5);
     lv_obj_set_style_bg_color(dot_weather_, lv_color_hex(0x31353E), 0);
 
+#if CONFIG_WS185C_ENABLE_NAVIDROME
     // 激活对应页面为 18px 亮青色胶囊
     if (active_page == -1) {
         lv_obj_set_size(dot_player_, 18, 5);
         lv_obj_set_style_bg_color(dot_player_, lv_color_hex(0x00D2FF), 0);
-    } else if (active_page == 1) {
+    } else
+#endif
+        if (active_page == 1) {
         lv_obj_set_size(dot_weather_, 18, 5);
         lv_obj_set_style_bg_color(dot_weather_, lv_color_hex(0x00D2FF), 0);
     } else {
@@ -1194,6 +1286,7 @@ void CustomLcdDisplay::UpdateTomorrowWeather(const TomorrowWeather& weather) {
 }
 
 void CustomLcdDisplay::ShowPlayerPage() {
+#if CONFIG_WS185C_ENABLE_NAVIDROME
     DisplayLockGuard lock(this);
     EnsurePlayerUI();
 
@@ -1207,6 +1300,11 @@ void CustomLcdDisplay::ShowPlayerPage() {
     if (settings_overlay_) {
         lv_obj_add_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
     }
+#if CONFIG_WS185C_ENABLE_BESZEL
+    if (server_overlay_) {
+        lv_obj_add_flag(server_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
     if (player_overlay_) {
         lv_obj_remove_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(player_overlay_);
@@ -1217,6 +1315,9 @@ void CustomLcdDisplay::ShowPlayerPage() {
     }
     UpdateIndicator(-1);
     SetPlayerAnimationActive(is_playing_);
+#else
+    ShowHomePage();
+#endif
 }
 
 void CustomLcdDisplay::ShowWeatherPage() {
@@ -1225,15 +1326,22 @@ void CustomLcdDisplay::ShowWeatherPage() {
     SetPlayerAnimationActive(false);
 
     current_page_ = 1;
+#if CONFIG_WS185C_ENABLE_NAVIDROME
     if (player_overlay_) {
         lv_obj_add_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
     }
+#endif
     if (home_dashboard_) {
         lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
     }
     if (settings_overlay_) {
         lv_obj_add_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
     }
+#if CONFIG_WS185C_ENABLE_BESZEL
+    if (server_overlay_) {
+        lv_obj_add_flag(server_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
     if (weather_overlay_) {
         lv_obj_remove_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(weather_overlay_);
@@ -1249,15 +1357,22 @@ void CustomLcdDisplay::ShowHomePage() {
     DisplayLockGuard lock(this);
     SetPlayerAnimationActive(false);
     current_page_ = 0;
+#if CONFIG_WS185C_ENABLE_NAVIDROME
     if (player_overlay_) {
         lv_obj_add_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
     }
+#endif
     if (weather_overlay_) {
         lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
     }
     if (settings_overlay_) {
         lv_obj_add_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
     }
+#if CONFIG_WS185C_ENABLE_BESZEL
+    if (server_overlay_) {
+        lv_obj_add_flag(server_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
     if (home_dashboard_) {
         lv_obj_remove_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(home_dashboard_);
@@ -1279,12 +1394,19 @@ void CustomLcdDisplay::ShowSettingsPage() {
     if (weather_overlay_) {
         lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
     }
+#if CONFIG_WS185C_ENABLE_NAVIDROME
     if (player_overlay_) {
         lv_obj_add_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
     }
+#endif
     if (home_dashboard_) {
         lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
     }
+#if CONFIG_WS185C_ENABLE_BESZEL
+    if (server_overlay_) {
+        lv_obj_add_flag(server_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
     if (indicator_container_) {
         lv_obj_add_flag(indicator_container_, LV_OBJ_FLAG_HIDDEN);
     }
@@ -1294,22 +1416,84 @@ void CustomLcdDisplay::ShowSettingsPage() {
     }
 }
 
+void CustomLcdDisplay::ShowServerPage() {
+#if CONFIG_WS185C_ENABLE_BESZEL
+    DisplayLockGuard lock(this);
+    EnsureServerUI();
+    UpdateServerUI();
+    SetPlayerAnimationActive(false);
+
+    current_page_ = 3;
+    vps_carousel_counter_ = 0;
+
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    if (player_overlay_) {
+        lv_obj_add_flag(player_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
+    if (weather_overlay_) {
+        lv_obj_add_flag(weather_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (settings_overlay_) {
+        lv_obj_add_flag(settings_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (home_dashboard_) {
+        lv_obj_add_flag(home_dashboard_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (indicator_container_) {
+        lv_obj_add_flag(indicator_container_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (server_overlay_) {
+        lv_obj_remove_flag(server_overlay_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(server_overlay_);
+    }
+
+    // 触发异步数据更新：若距离上次拉取超过 5 秒，则重置间隔允许立刻更新
+    int64_t now_sec = esp_timer_get_time() / 1000000;
+    if (last_server_fetch_sec_ != 0 && (now_sec - last_server_fetch_sec_) >= 5) {
+        last_server_fetch_sec_ = 0;
+    }
+    CheckAndTriggerServerFetch();
+#else
+    ShowHomePage();
+#endif
+}
+
+#if CONFIG_WS185C_ENABLE_BESZEL
+void CustomLcdDisplay::NextVpsNode() {
+    DisplayLockGuard lock(this);
+    if (vps_nodes_.empty())
+        return;
+    current_vps_idx_ = (current_vps_idx_ + 1) % vps_nodes_.size();
+    vps_carousel_counter_ = 0;
+    UpdateServerUI();
+}
+
+void CustomLcdDisplay::PrevVpsNode() {
+    DisplayLockGuard lock(this);
+    if (vps_nodes_.empty())
+        return;
+    if (current_vps_idx_ == 0) {
+        current_vps_idx_ = vps_nodes_.size() - 1;
+    } else {
+        current_vps_idx_--;
+    }
+    vps_carousel_counter_ = 0;
+    UpdateServerUI();
+}
+#endif
+
 // ========================================================
 // 懒加载：第三屏 Cyber HUD 音乐播放器 (Music Player)
 // ========================================================
+#if CONFIG_WS185C_ENABLE_NAVIDROME
 void CustomLcdDisplay::EnsurePlayerUI() {
     if (player_ui_created_)
         return;
     player_ui_created_ = true;
 
-    if (playlist_.empty()) {
-        playlist_ = {
-            {"18cbea8743060d9c8ddfc7008418022b", "威廉古堡", "Jay Chou · 范特西", "NAVIDROME", 236},
-            {"29b6607b952b7d5f9470483d68dafc43", "白鴿", "伍佰 & China Blue", "NAVIDROME", 367},
-            {"5ec0b2083250b4f2c9abdb73df9dbbd2", "Lady", "Brett Young", "NAVIDROME", 193},
-            {"235425d0f88619d3e45822f500f23239", "I Gotta Feeling", "The Black Eyed Peas", "NAVIDROME", 288},
-            {"232668d7e7a1c4705aab26d0bb06456c", "Fire Nation", "Two Steps From Hell", "NAVIDROME", 181}
-        };
+    playlist_.clear();
+    if (service_config_ && service_config_->GetNavidromeConfig().IsConfigured()) {
         FetchNavidromePlaylist();
     }
 
@@ -1385,7 +1569,8 @@ void CustomLcdDisplay::EnsurePlayerUI() {
     lv_obj_set_style_border_width(spectrum_box, 0, 0);
     lv_obj_set_style_pad_all(spectrum_box, 0, 0);
     lv_obj_set_flex_flow(spectrum_box, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(spectrum_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(spectrum_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(spectrum_box, 3, 0);
     lv_obj_remove_flag(spectrum_box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(spectrum_box, LV_OBJ_FLAG_CLICKABLE);
@@ -1393,8 +1578,7 @@ void CustomLcdDisplay::EnsurePlayerUI() {
     // 13 柱全景音律渐变色彩体系（从青蓝两翼过渡到极光高光中央）
     static const uint32_t kEqColors[kEqBarCount] = {
         0x0284C7, 0x0EA5E9, 0x38BDF8, 0x00E5FF, 0x2DD4BF, 0x34D399, 0x6EE7B7,
-        0x34D399, 0x2DD4BF, 0x00E5FF, 0x38BDF8, 0x0EA5E9, 0x0284C7
-    };
+        0x34D399, 0x2DD4BF, 0x00E5FF, 0x38BDF8, 0x0EA5E9, 0x0284C7};
     for (size_t i = 0; i < kEqBarCount; ++i) {
         eq_bars_[i] = lv_obj_create(spectrum_box);
         lv_obj_set_size(eq_bars_[i], 5, 4);
@@ -1428,7 +1612,8 @@ void CustomLcdDisplay::EnsurePlayerUI() {
     lv_obj_set_style_border_width(ctrl_row, 0, 0);
     lv_obj_set_style_pad_all(ctrl_row, 0, 0);
     lv_obj_set_flex_flow(ctrl_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(ctrl_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(ctrl_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(ctrl_row, 22, 0);
     lv_obj_remove_flag(ctrl_row, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -1508,8 +1693,46 @@ void CustomLcdDisplay::EnsurePlayerUI() {
 }
 
 void CustomLcdDisplay::UpdatePlayerUI() {
-    if (!player_ui_created_ || playlist_.empty())
+    if (!player_ui_created_)
         return;
+
+    if (playlist_.empty()) {
+        if (!service_config_ || !service_config_->GetNavidromeConfig().IsConfigured()) {
+            if (player_header_label_)
+                lv_label_set_text(player_header_label_, "♪ 未配置");
+            if (player_title_label_)
+                lv_label_set_text(player_title_label_, "请配置 Navidrome");
+            if (player_artist_label_)
+                lv_label_set_text(player_artist_label_, "使用 MCP 或 NVS 设置");
+        } else if (navidrome_status_ == ServiceStatus::kAuthError) {
+            if (player_header_label_)
+                lv_label_set_text(player_header_label_, "♪ 认证失败");
+            if (player_title_label_)
+                lv_label_set_text(player_title_label_, "账号或密码错误");
+            if (player_artist_label_)
+                lv_label_set_text(player_artist_label_, "请检查配置");
+        } else if (navidrome_status_ == ServiceStatus::kNetworkError) {
+            if (player_header_label_)
+                lv_label_set_text(player_header_label_, "♪ 网络不可达");
+            if (player_title_label_)
+                lv_label_set_text(player_title_label_, "无法连接服务器");
+            if (player_artist_label_)
+                lv_label_set_text(player_artist_label_, "请检查网络或地址");
+        } else {
+            if (player_header_label_)
+                lv_label_set_text(player_header_label_, "♪ 无曲目");
+            if (player_title_label_)
+                lv_label_set_text(player_title_label_, "曲库暂无音乐");
+            if (player_artist_label_)
+                lv_label_set_text(player_artist_label_, "等待拉取...");
+        }
+        if (player_time_label_)
+            lv_label_set_text(player_time_label_, "--:--");
+        if (player_arc_)
+            lv_arc_set_value(player_arc_, 0);
+        SetPlayerAnimationActive(false);
+        return;
+    }
 
     const auto& track = playlist_[current_track_idx_];
 
@@ -1584,9 +1807,7 @@ void CustomLcdDisplay::UpdatePlayerAnimation() {
     anim_step_++;
 
     // 13 根声波柱的大开大合声学跳动包络（中央最高 44px，两翼自然收束）
-    static const int kBaseMaxH[kEqBarCount] = {
-        10, 16, 22, 28, 34, 40, 44, 40, 34, 28, 22, 16, 10
-    };
+    static const int kBaseMaxH[kEqBarCount] = {10, 16, 22, 28, 34, 40, 44, 40, 34, 28, 22, 16, 10};
     for (size_t i = 0; i < kEqBarCount; ++i) {
         if (!eq_bars_[i])
             continue;
@@ -1614,6 +1835,11 @@ void CustomLcdDisplay::StopNavidromeStream() {
 void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
     StopNavidromeStream();
 
+    if (!service_config_ || !service_config_->GetNavidromeConfig().IsConfigured()) {
+        ESP_LOGW(TAG, "Navidrome is unconfigured, cannot stream");
+        return;
+    }
+
     if (playlist_.empty() || track_idx >= playlist_.size())
         return;
 
@@ -1627,6 +1853,7 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
     stream_stop_requested_ = false;
     current_playback_id_++;
     uint32_t my_playback_id = current_playback_id_;
+    (void)my_playback_id;
 
     xTaskCreate(
         [](void* param) {
@@ -1656,8 +1883,9 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
                                      "&format=opus&maxBitRate=96&u=" + self->navidrome_user_ +
                                      "&p=" + self->navidrome_pass_ + "&v=1.16.1&c=xiaozhi";
 
-            ESP_LOGI(TAG, "Navidrome streaming start [%lu]: %s",
-                     (unsigned long)my_playback_id, self->playlist_[idx].title.c_str());
+            ESP_LOGI(TAG, "Navidrome streaming start [%lu]: %s (url: %s)",
+                     (unsigned long)my_playback_id, self->playlist_[idx].title.c_str(),
+                     waveshare185c::ServiceConfig::RedactUrl(stream_url).c_str());
 
             auto http = network->CreateHttp(0);
             bool natural_finish = false;
@@ -1670,8 +1898,8 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
                 if (http->Open("GET", stream_url)) {
                     auto status = http->GetStatusCode();
                     if (status && *status >= 200 && *status < 300 &&
-                        !self->stream_stop_requested_ && self->current_playback_id_ == my_playback_id) {
-
+                        !self->stream_stop_requested_ &&
+                        self->current_playback_id_ == my_playback_id) {
                         auto demuxer = std::make_unique<OggDemuxer>();
                         auto buffer = std::make_unique<std::array<char, 1024>>();
                         uint32_t media_position_ms = 0;
@@ -1693,8 +1921,9 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
                             packet->media_position_ms = media_position_ms;
                             packet->payload.assign(data, data + size);
 
-                            if (!Application::GetInstance().GetAudioService().PushPacketToDecodeQueue(
-                                    std::move(packet), true)) {
+                            if (!Application::GetInstance()
+                                     .GetAudioService()
+                                     .PushPacketToDecodeQueue(std::move(packet), true)) {
                                 packet_error = true;
                                 return;
                             }
@@ -1714,7 +1943,8 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
                                 eof = true;
                                 break;
                             }
-                            demuxer->Process(reinterpret_cast<const uint8_t*>(buffer->data()), *read_size);
+                            demuxer->Process(reinterpret_cast<const uint8_t*>(buffer->data()),
+                                             *read_size);
                             if (demuxer->HasError()) {
                                 ESP_LOGE(TAG, "Navidrome demuxer error during decode");
                                 break;
@@ -1735,9 +1965,7 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
             if (natural_finish && !self->stream_stop_requested_ &&
                 self->current_playback_id_ == my_playback_id && self->is_playing_) {
                 ESP_LOGI(TAG, "Navidrome track finished naturally, advance to next track");
-                Application::GetInstance().Schedule([self]() {
-                    self->OnPlayerNextClicked();
-                });
+                Application::GetInstance().Schedule([self]() { self->OnPlayerNextClicked(); });
             }
 
             if (self->stream_task_handle_ == xTaskGetCurrentTaskHandle()) {
@@ -1749,6 +1977,8 @@ void CustomLcdDisplay::StartNavidromeStream(size_t track_idx) {
 }
 
 void CustomLcdDisplay::OnPlayerPlayPauseClicked() {
+    if (playlist_.empty())
+        return;
     is_playing_ = !is_playing_;
     if (is_playing_) {
         StartNavidromeStream(current_track_idx_);
@@ -1783,6 +2013,7 @@ void CustomLcdDisplay::OnPlayerNextClicked() {
     }
     UpdatePlayerUI();
 }
+#endif
 
 void CustomLcdDisplay::CheckAndTriggerWeatherFetch() {
     auto& app = Application::GetInstance();
@@ -1849,7 +2080,8 @@ void CustomLcdDisplay::FetchWeatherData() {
                         cJSON* loc_arr = cJSON_GetObjectItem(data, "location");
                         if (loc_arr && cJSON_GetArraySize(loc_arr) >= 3) {
                             cJSON* city_item = cJSON_GetArrayItem(loc_arr, 2);
-                            if (city_item && city_item->valuestring && strlen(city_item->valuestring) > 0) {
+                            if (city_item && city_item->valuestring &&
+                                strlen(city_item->valuestring) > 0) {
                                 detected_city = city_item->valuestring;
                                 if (detected_city.find("市") == std::string::npos) {
                                     detected_city += "市";
@@ -1944,9 +2176,7 @@ void CustomLcdDisplay::FetchWeatherData() {
             }
         }
 
-        Application::GetInstance().Schedule([this, tw]() {
-            this->UpdateTomorrowWeather(tw);
-        });
+        Application::GetInstance().Schedule([this, tw]() { this->UpdateTomorrowWeather(tw); });
     }
 
     cJSON_Delete(root);
@@ -2093,9 +2323,7 @@ void CustomLcdDisplay::EnsureSettingsUI() {
 
     lv_obj_add_event_cb(
         volume_slider_,
-        [](lv_event_t* e) {
-            Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
-        },
+        [](lv_event_t* e) { Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP); },
         LV_EVENT_RELEASED, this);
 
     // 4. 网络与 Navidrome 服务状态 (y: 198 ~ 250)
@@ -2108,7 +2336,7 @@ void CustomLcdDisplay::EnsureSettingsUI() {
     settings_navidrome_label_ = lv_label_create(settings_overlay_);
     lv_obj_set_style_text_font(settings_navidrome_label_, &font_maison_neue_book_14, 0);
     lv_obj_set_style_text_color(settings_navidrome_label_, lv_color_hex(0x60A5FA), 0);
-    lv_label_set_text(settings_navidrome_label_, "NAVI: 192.168.2.14:1011");
+    lv_label_set_text(settings_navidrome_label_, "NAVI: --");
     lv_obj_align(settings_navidrome_label_, LV_ALIGN_TOP_MID, 0, 224);
 
     // 5. 底部收起胶囊按钮 (y: 266, w: 120, h: 36)
@@ -2169,24 +2397,76 @@ void CustomLcdDisplay::UpdateSettingsValues() {
     }
 
     if (settings_navidrome_label_) {
-        std::string n_str = "NAVI: " + navidrome_server_;
-        if (n_str.find("http://") != std::string::npos) {
-            n_str.erase(n_str.find("http://"), 7);
-        }
-        if (!n_str.empty() && n_str.back() == '/') {
-            n_str.pop_back();
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+        std::string n_str;
+        if (!service_config_ || !service_config_->GetNavidromeConfig().IsConfigured()) {
+            n_str = "NAVI: 未配置";
+        } else if (navidrome_status_ == ServiceStatus::kAuthError) {
+            n_str = "NAVI: 认证失败";
+        } else if (navidrome_status_ == ServiceStatus::kNetworkError) {
+            n_str = "NAVI: 网络不可达";
+        } else {
+            n_str = "NAVI: " + navidrome_server_;
+            if (n_str.find("http://") != std::string::npos) {
+                n_str.erase(n_str.find("http://"), 7);
+            } else if (n_str.find("https://") != std::string::npos) {
+                n_str.erase(n_str.find("https://"), 8);
+            }
+            if (!n_str.empty() && n_str.back() == '/') {
+                n_str.pop_back();
+            }
         }
         lv_label_set_text(settings_navidrome_label_, n_str.c_str());
+#else
+        lv_label_set_text(settings_navidrome_label_, "NAVI: 已禁用");
+#endif
     }
 }
 
-void CustomLcdDisplay::SetNavidromeServer(const std::string& url) {
-    DisplayLockGuard lock(this);
-    navidrome_server_ = url;
-    UpdateSettingsValues();
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+bool CustomLcdDisplay::ConfigureNavidrome(const std::string& url, const std::string& user,
+                                          const std::string& pass, std::string& err_msg) {
+    if (!service_config_) {
+        err_msg = "service config not initialized";
+        return false;
+    }
+    if (!service_config_->SetNavidromeConfig(url, user, pass, err_msg)) {
+        return false;
+    }
+    bool was_configured = false;
+    {
+        DisplayLockGuard lock(this);
+        auto navi_cfg = service_config_->GetNavidromeConfig();
+        navidrome_server_ = navi_cfg.url;
+        navidrome_user_ = navi_cfg.user;
+        navidrome_pass_ = navi_cfg.pass;
+        navidrome_status_ =
+            navi_cfg.IsConfigured() ? ServiceStatus::kOk : ServiceStatus::kUnconfigured;
+        was_configured = (navidrome_status_ == ServiceStatus::kOk);
+
+        UpdateSettingsValues();
+        if (!was_configured) {
+            playlist_.clear();
+            current_track_idx_ = 0;
+            play_elapsed_sec_ = 0;
+            UpdatePlayerUI();
+        }
+    }
+    if (was_configured) {
+        FetchNavidromePlaylist();
+    }
+    return true;
 }
 
 void CustomLcdDisplay::FetchNavidromePlaylist() {
+    if (navidrome_server_.empty() || navidrome_user_.empty() || navidrome_pass_.empty()) {
+        DisplayLockGuard lock(this);
+        navidrome_status_ = ServiceStatus::kUnconfigured;
+        UpdatePlayerUI();
+        UpdateSettingsValues();
+        return;
+    }
+
     if (navidrome_fetching_)
         return;
     navidrome_fetching_ = true;
@@ -2197,15 +2477,21 @@ void CustomLcdDisplay::FetchNavidromePlaylist() {
             auto network = Board::GetInstance().GetNetwork();
             if (!network) {
                 self->navidrome_fetching_ = false;
+                self->navidrome_status_ = ServiceStatus::kNetworkError;
+                Application::GetInstance().Schedule([self]() {
+                    self->UpdatePlayerUI();
+                    self->UpdateSettingsValues();
+                });
                 vTaskDelete(NULL);
                 return;
             }
 
-            std::string url = self->navidrome_server_ + "/rest/getRandomSongs.view?u=" +
-                              self->navidrome_user_ + "&p=" + self->navidrome_pass_ +
-                              "&v=1.16.1&c=xiaozhi&f=json&size=10";
+            std::string url = self->navidrome_server_ +
+                              "/rest/getRandomSongs.view?u=" + self->navidrome_user_ +
+                              "&p=" + self->navidrome_pass_ + "&v=1.16.1&c=xiaozhi&f=json&size=10";
 
-            ESP_LOGI(TAG, "Fetching Navidrome songs from: %s", self->navidrome_server_.c_str());
+            std::string safe_url = ServiceConfig::RedactUrl(self->navidrome_server_);
+            ESP_LOGI(TAG, "Fetching Navidrome songs from: %s", safe_url.c_str());
 
             auto http = network->CreateHttp(0);
             if (http) {
@@ -2218,58 +2504,852 @@ void CustomLcdDisplay::FetchNavidromePlaylist() {
                         if (root) {
                             cJSON* resp = cJSON_GetObjectItem(root, "subsonic-response");
                             if (resp) {
-                                cJSON* random_songs = cJSON_GetObjectItem(resp, "randomSongs");
-                                if (random_songs) {
-                                    cJSON* song_arr = cJSON_GetObjectItem(random_songs, "song");
-                                    if (song_arr && cJSON_IsArray(song_arr)) {
-                                        int count = cJSON_GetArraySize(song_arr);
-                                        std::vector<MusicTrack> new_list;
-                                        for (int i = 0; i < count; i++) {
-                                            cJSON* s = cJSON_GetArrayItem(song_arr, i);
-                                            if (!s)
-                                                continue;
-                                            MusicTrack t;
-                                            cJSON* id = cJSON_GetObjectItem(s, "id");
-                                            cJSON* title = cJSON_GetObjectItem(s, "title");
-                                            cJSON* artist = cJSON_GetObjectItem(s, "artist");
-                                            cJSON* duration = cJSON_GetObjectItem(s, "duration");
-                                            if (id && id->valuestring)
-                                                t.id = id->valuestring;
-                                            if (title && title->valuestring)
-                                                t.title = title->valuestring;
-                                            if (artist && artist->valuestring)
-                                                t.artist = artist->valuestring;
-                                            if (duration)
-                                                t.duration_sec = duration->valueint;
-                                            t.source = "NAVIDROME";
-                                            new_list.push_back(std::move(t));
-                                        }
-                                        if (!new_list.empty()) {
-                                            ESP_LOGI(TAG, "Navidrome loaded %d songs successfully",
-                                                     (int)new_list.size());
-                                            Application::GetInstance().Schedule(
-                                                [self, new_list = std::move(new_list)]() mutable {
-                                                    self->playlist_ = std::move(new_list);
-                                                    self->current_track_idx_ = 0;
-                                                    self->play_elapsed_sec_ = 0;
-                                                    self->UpdatePlayerUI();
-                                                    self->UpdateSettingsValues();
-                                                });
+                                cJSON* status_item = cJSON_GetObjectItem(resp, "status");
+                                if (status_item && status_item->valuestring &&
+                                    strcmp(status_item->valuestring, "failed") == 0) {
+                                    self->navidrome_status_ = ServiceStatus::kAuthError;
+                                } else {
+                                    cJSON* random_songs = cJSON_GetObjectItem(resp, "randomSongs");
+                                    if (random_songs) {
+                                        cJSON* song_arr = cJSON_GetObjectItem(random_songs, "song");
+                                        if (song_arr && cJSON_IsArray(song_arr)) {
+                                            int count = cJSON_GetArraySize(song_arr);
+                                            std::vector<MusicTrack> new_list;
+                                            for (int i = 0; i < count; i++) {
+                                                cJSON* s = cJSON_GetArrayItem(song_arr, i);
+                                                if (!s)
+                                                    continue;
+                                                MusicTrack t;
+                                                cJSON* id = cJSON_GetObjectItem(s, "id");
+                                                cJSON* title = cJSON_GetObjectItem(s, "title");
+                                                cJSON* artist = cJSON_GetObjectItem(s, "artist");
+                                                cJSON* duration =
+                                                    cJSON_GetObjectItem(s, "duration");
+                                                if (id && id->valuestring)
+                                                    t.id = id->valuestring;
+                                                if (title && title->valuestring)
+                                                    t.title = title->valuestring;
+                                                if (artist && artist->valuestring)
+                                                    t.artist = artist->valuestring;
+                                                if (duration)
+                                                    t.duration_sec = duration->valueint;
+                                                t.source = "NAVIDROME";
+                                                new_list.push_back(std::move(t));
+                                            }
+                                            if (!new_list.empty()) {
+                                                ESP_LOGI(TAG,
+                                                         "Navidrome loaded %d songs successfully",
+                                                         (int)new_list.size());
+                                                self->navidrome_status_ = ServiceStatus::kOk;
+                                                Application::GetInstance().Schedule(
+                                                    [self,
+                                                     new_list = std::move(new_list)]() mutable {
+                                                        self->playlist_ = std::move(new_list);
+                                                        self->current_track_idx_ = 0;
+                                                        self->play_elapsed_sec_ = 0;
+                                                        self->UpdatePlayerUI();
+                                                        self->UpdateSettingsValues();
+                                                    });
+                                            }
                                         }
                                     }
                                 }
                             }
                             cJSON_Delete(root);
                         }
+                    } else if (status && (*status == 401 || *status == 403)) {
+                        self->navidrome_status_ = ServiceStatus::kAuthError;
+                    } else {
+                        self->navidrome_status_ = ServiceStatus::kNetworkError;
                     }
                     http->Close();
+                } else {
+                    self->navidrome_status_ = ServiceStatus::kNetworkError;
                 }
+            } else {
+                self->navidrome_status_ = ServiceStatus::kNetworkError;
             }
+
+            Application::GetInstance().Schedule([self]() {
+                self->UpdatePlayerUI();
+                self->UpdateSettingsValues();
+            });
 
             self->navidrome_fetching_ = false;
             vTaskDelete(NULL);
         },
         "navi_fetch", 4096, this, 3, NULL);
 }
+#endif
 
+#if CONFIG_WS185C_ENABLE_BESZEL
+// ========================================================
+// 懒加载：第五屏 Beszel VPS 集群机能监控看板 (Server Telemetry HUD)
+// ========================================================
+void CustomLcdDisplay::EnsureServerUI() {
+    if (server_ui_created_)
+        return;
+    server_ui_created_ = true;
 
+    auto screen = lv_screen_active();
+    server_overlay_ = lv_obj_create(screen);
+    lv_obj_set_size(server_overlay_, 360, 360);
+    lv_obj_set_pos(server_overlay_, 0, 0);
+    lv_obj_set_style_bg_color(server_overlay_, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(server_overlay_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(server_overlay_, 0, 0);
+    lv_obj_set_style_pad_all(server_overlay_, 0, 0);
+    lv_obj_set_style_radius(server_overlay_, 180, 0);
+    lv_obj_remove_flag(server_overlay_, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 绑定向下滑动返回主屏，左右滑动切换 VPS
+    auto on_server_gesture = [](lv_event_t* e) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+        lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+        if (dir == LV_DIR_BOTTOM) {
+            self->ShowHomePage();
+        } else if (dir == LV_DIR_LEFT) {
+            self->NextVpsNode();
+        } else if (dir == LV_DIR_RIGHT) {
+            self->PrevVpsNode();
+        }
+    };
+    lv_obj_add_event_cb(server_overlay_, on_server_gesture, LV_EVENT_GESTURE, this);
+
+    // 点击屏幕也可切换下一台 VPS
+    lv_obj_add_event_cb(
+        server_overlay_,
+        [](lv_event_t* e) {
+            auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+            self->NextVpsNode();
+        },
+        LV_EVENT_CLICKED, this);
+
+    // 1. 外圈精密刻度装饰环 (Outer Precision Bezel Track, D: 346)
+    lv_obj_t* outer_track = lv_obj_create(server_overlay_);
+    lv_obj_set_size(outer_track, 346, 346);
+    lv_obj_align(outer_track, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_opa(outer_track, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(outer_track, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(outer_track, 1, 0);
+    lv_obj_set_style_border_opa(outer_track, 50, 0);
+    lv_obj_set_style_radius(outer_track, 173, 0);
+    lv_obj_remove_flag(outer_track, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(outer_track, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(outer_track, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // 1.1 四向准星刻度线 (12点/6点/9点/3点)
+    auto create_tick = [this](int w, int h, lv_align_t align, int x, int y) {
+        lv_obj_t* t = lv_obj_create(server_overlay_);
+        lv_obj_set_size(t, w, h);
+        lv_obj_align(t, align, x, y);
+        lv_obj_set_style_bg_color(t, lv_color_hex(0x00F3FF), 0);
+        lv_obj_set_style_border_width(t, 0, 0);
+        lv_obj_remove_flag(t, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(t, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_flag(t, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        return t;
+    };
+    create_tick(2, 7, LV_ALIGN_TOP_MID, 0, 4);
+    create_tick(2, 7, LV_ALIGN_BOTTOM_MID, 0, -4);
+    create_tick(7, 2, LV_ALIGN_LEFT_MID, 4, 0);
+    create_tick(7, 2, LV_ALIGN_RIGHT_MID, -4, 0);
+
+    // 2. 同心三环 (Concentric Multi-Ring Engine)
+    // 2.1 RING 1 (OUTER): LOAD (D: 326, R: 163, stroke: 6)
+    server_arc_load_ = lv_arc_create(server_overlay_);
+    lv_obj_set_size(server_arc_load_, 326, 326);
+    lv_obj_align(server_arc_load_, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_rotation(server_arc_load_, 270);
+    lv_arc_set_bg_angles(server_arc_load_, 0, 360);
+    lv_arc_set_range(server_arc_load_, 0, 100);
+    lv_arc_set_value(server_arc_load_, 0);
+    lv_obj_remove_style(server_arc_load_, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(server_arc_load_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(server_arc_load_, 6, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(server_arc_load_, lv_color_hex(0x350A15), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(server_arc_load_, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(server_arc_load_, lv_color_hex(0xFF2D55), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(server_arc_load_, true, LV_PART_INDICATOR);
+    lv_obj_add_flag(server_arc_load_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(server_arc_load_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // 2.2 RING 2 (MIDDLE): RAM USAGE (D: 300, R: 150, stroke: 5)
+    server_arc_ram_ = lv_arc_create(server_overlay_);
+    lv_obj_set_size(server_arc_ram_, 300, 300);
+    lv_obj_align(server_arc_ram_, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_rotation(server_arc_ram_, 270);
+    lv_arc_set_bg_angles(server_arc_ram_, 0, 360);
+    lv_arc_set_range(server_arc_ram_, 0, 100);
+    lv_arc_set_value(server_arc_ram_, 0);
+    lv_obj_remove_style(server_arc_ram_, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(server_arc_ram_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(server_arc_ram_, 5, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(server_arc_ram_, lv_color_hex(0x05263D), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(server_arc_ram_, 5, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(server_arc_ram_, lv_color_hex(0x00F3FF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(server_arc_ram_, true, LV_PART_INDICATOR);
+    lv_obj_add_flag(server_arc_ram_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(server_arc_ram_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // 2.3 RING 3 (INNER): DISK USAGE (D: 274, R: 137, stroke: 5 - 放大的最内环)
+    server_arc_disk_ = lv_arc_create(server_overlay_);
+    lv_obj_set_size(server_arc_disk_, 274, 274);
+    lv_obj_align(server_arc_disk_, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_rotation(server_arc_disk_, 270);
+    lv_arc_set_bg_angles(server_arc_disk_, 0, 360);
+    lv_arc_set_range(server_arc_disk_, 0, 100);
+    lv_arc_set_value(server_arc_disk_, 0);
+    lv_obj_remove_style(server_arc_disk_, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(server_arc_disk_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(server_arc_disk_, 5, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(server_arc_disk_, lv_color_hex(0x28103E), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(server_arc_disk_, 5, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(server_arc_disk_, lv_color_hex(0xB054FF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(server_arc_disk_, true, LV_PART_INDICATOR);
+    lv_obj_add_flag(server_arc_disk_, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(server_arc_disk_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // 内环装饰细圈 (D: 252)
+    lv_obj_t* inner_deco = lv_obj_create(server_overlay_);
+    lv_obj_set_size(inner_deco, 252, 252);
+    lv_obj_align(inner_deco, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_opa(inner_deco, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(inner_deco, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(inner_deco, 1, 0);
+    lv_obj_set_style_border_opa(inner_deco, 40, 0);
+    lv_obj_set_style_radius(inner_deco, 126, 0);
+    lv_obj_remove_flag(inner_deco, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(inner_deco, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(inner_deco, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // 3. PURE DATA MINIMAL CORE (中心内容区: w: 210, h: 210)
+    lv_obj_t* core = lv_obj_create(server_overlay_);
+    lv_obj_set_size(core, 210, 210);
+    lv_obj_align(core, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_opa(core, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(core, 0, 0);
+    lv_obj_set_style_pad_all(core, 0, 0);
+    lv_obj_remove_flag(core, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(core, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(core, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // 3.1 TOP MICRO HEADER: ● BESZEL [0/0]
+    lv_obj_t* hdr_box = lv_obj_create(core);
+    lv_obj_set_size(hdr_box, 200, 20);
+    lv_obj_align(hdr_box, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_set_style_bg_opa(hdr_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(hdr_box, 0, 0);
+    lv_obj_set_style_pad_all(hdr_box, 0, 0);
+    lv_obj_set_flex_flow(hdr_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(hdr_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(hdr_box, 6, 0);
+    lv_obj_remove_flag(hdr_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(hdr_box, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(hdr_box, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    server_status_dot_ = lv_obj_create(hdr_box);
+    lv_obj_set_size(server_status_dot_, 6, 6);
+    lv_obj_set_style_radius(server_status_dot_, 3, 0);
+    lv_obj_set_style_bg_color(server_status_dot_, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(server_status_dot_, 0, 0);
+
+    server_name_label_ = lv_label_create(hdr_box);
+    lv_obj_set_style_text_font(server_name_label_, &font_noto_sans_basic_16_4, 0);
+    lv_obj_set_style_text_color(server_name_label_, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(server_name_label_, "BESZEL");
+
+    server_counter_label_ = lv_label_create(hdr_box);
+    lv_obj_set_style_text_font(server_counter_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(server_counter_label_, lv_color_hex(0x00D2FF), 0);
+    lv_label_set_text(server_counter_label_, "[0/0]");
+
+    // 3.2 HERO LOAD METRIC (-- / SYSTEM LOAD)
+    server_load_val_ = lv_label_create(core);
+    lv_obj_set_style_text_font(server_load_val_, &font_maison_neue_book_26, 0);
+    lv_obj_set_style_text_color(server_load_val_, lv_color_hex(0xFF2D55), 0);
+    lv_label_set_text(server_load_val_, "--");
+    lv_obj_align(server_load_val_, LV_ALIGN_TOP_MID, 0, 32);
+
+    lv_obj_t* load_tag = lv_label_create(core);
+    lv_obj_set_style_text_font(load_tag, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(load_tag, lv_color_hex(0xFF6B8B), 0);
+    lv_label_set_text(load_tag, "SYSTEM LOAD");
+    lv_obj_align(load_tag, LV_ALIGN_TOP_MID, 0, 64);
+
+    // 3.3 THREE-LINE COMPACT TELEMETRY MATRIX
+    lv_obj_t* matrix = lv_obj_create(core);
+    lv_obj_set_size(matrix, 172, 60);
+    lv_obj_align(matrix, LV_ALIGN_TOP_MID, 0, 88);
+    lv_obj_set_style_bg_opa(matrix, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(matrix, 0, 0);
+    lv_obj_set_style_pad_all(matrix, 0, 0);
+    lv_obj_remove_flag(matrix, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(matrix, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(matrix, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // Line 1: RAM
+    lv_obj_t* r1_dot = lv_obj_create(matrix);
+    lv_obj_set_size(r1_dot, 4, 4);
+    lv_obj_set_style_radius(r1_dot, 2, 0);
+    lv_obj_set_style_bg_color(r1_dot, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(r1_dot, 0, 0);
+    lv_obj_align(r1_dot, LV_ALIGN_TOP_LEFT, 0, 6);
+
+    lv_obj_t* r1_lbl = lv_label_create(matrix);
+    lv_obj_set_style_text_font(r1_lbl, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(r1_lbl, lv_color_hex(0x00F3FF), 0);
+    lv_label_set_text(r1_lbl, "RAM");
+    lv_obj_align(r1_lbl, LV_ALIGN_TOP_LEFT, 10, 0);
+
+    server_ram_val_ = lv_label_create(matrix);
+    lv_obj_set_style_text_font(server_ram_val_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(server_ram_val_, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(server_ram_val_, "--");
+    lv_obj_align(server_ram_val_, LV_ALIGN_TOP_RIGHT, 0, 0);
+
+    // Line 2: DISK
+    lv_obj_t* r2_dot = lv_obj_create(matrix);
+    lv_obj_set_size(r2_dot, 4, 4);
+    lv_obj_set_style_radius(r2_dot, 2, 0);
+    lv_obj_set_style_bg_color(r2_dot, lv_color_hex(0xB054FF), 0);
+    lv_obj_set_style_border_width(r2_dot, 0, 0);
+    lv_obj_align(r2_dot, LV_ALIGN_TOP_LEFT, 0, 24);
+
+    lv_obj_t* r2_lbl = lv_label_create(matrix);
+    lv_obj_set_style_text_font(r2_lbl, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(r2_lbl, lv_color_hex(0xB054FF), 0);
+    lv_label_set_text(r2_lbl, "DISK");
+    lv_obj_align(r2_lbl, LV_ALIGN_TOP_LEFT, 10, 18);
+
+    server_disk_val_ = lv_label_create(matrix);
+    lv_obj_set_style_text_font(server_disk_val_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(server_disk_val_, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(server_disk_val_, "--");
+    lv_obj_align(server_disk_val_, LV_ALIGN_TOP_RIGHT, 0, 18);
+
+    // Line 3: NET
+    lv_obj_t* r3_dot = lv_obj_create(matrix);
+    lv_obj_set_size(r3_dot, 4, 4);
+    lv_obj_set_style_radius(r3_dot, 2, 0);
+    lv_obj_set_style_bg_color(r3_dot, lv_color_hex(0x4EDEA3), 0);
+    lv_obj_set_style_border_width(r3_dot, 0, 0);
+    lv_obj_align(r3_dot, LV_ALIGN_TOP_LEFT, 0, 42);
+
+    lv_obj_t* r3_lbl = lv_label_create(matrix);
+    lv_obj_set_style_text_font(r3_lbl, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(r3_lbl, lv_color_hex(0x4EDEA3), 0);
+    lv_label_set_text(r3_lbl, "NET");
+    lv_obj_align(r3_lbl, LV_ALIGN_TOP_LEFT, 10, 36);
+
+    server_net_val_ = lv_label_create(matrix);
+    lv_obj_set_style_text_font(server_net_val_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(server_net_val_, lv_color_hex(0x4EDEA3), 0);
+    lv_label_set_text(server_net_val_, "--");
+    lv_obj_align(server_net_val_, LV_ALIGN_TOP_RIGHT, 0, 36);
+
+    // 3.4 BOTTOM FOOTER: BESZEL HUD
+    server_footer_label_ = lv_label_create(core);
+    lv_obj_set_style_text_font(server_footer_label_, &font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(server_footer_label_, lv_color_hex(0x00D2FF), 0);
+    lv_label_set_text(server_footer_label_, "BESZEL HUD");
+    lv_obj_align(server_footer_label_, LV_ALIGN_TOP_MID, 0, 166);
+}
+
+void CustomLcdDisplay::UpdateServerUI() {
+    if (!server_ui_created_)
+        return;
+
+    bool is_configured = service_config_ && service_config_->GetBeszelConfig().IsConfigured();
+
+    if (!is_configured) {
+        if (server_name_label_)
+            lv_label_set_text(server_name_label_, "未配置服务");
+        if (server_counter_label_)
+            lv_label_set_text(server_counter_label_, "[0/0]");
+        if (server_load_val_)
+            lv_label_set_text(server_load_val_, "--");
+        if (server_ram_val_)
+            lv_label_set_text(server_ram_val_, "--");
+        if (server_disk_val_)
+            lv_label_set_text(server_disk_val_, "--");
+        if (server_net_val_)
+            lv_label_set_text(server_net_val_, "--");
+        if (server_footer_label_) {
+            lv_label_set_text(server_footer_label_, "UNCONFIGURED | BESZEL");
+            lv_obj_set_style_text_color(server_footer_label_, lv_color_hex(0x888888), 0);
+        }
+        if (server_status_dot_) {
+            lv_obj_set_style_bg_color(server_status_dot_, lv_color_hex(0x888888), 0);
+        }
+        if (server_arc_load_)
+            lv_arc_set_value(server_arc_load_, 0);
+        if (server_arc_ram_)
+            lv_arc_set_value(server_arc_ram_, 0);
+        if (server_arc_disk_)
+            lv_arc_set_value(server_arc_disk_, 0);
+        return;
+    }
+
+    if (beszel_status_ == ServiceStatus::kAuthError) {
+        if (server_name_label_)
+            lv_label_set_text(server_name_label_, "认证失败");
+        if (server_counter_label_)
+            lv_label_set_text(server_counter_label_, "[!/!]");
+        if (server_load_val_)
+            lv_label_set_text(server_load_val_, "ERR");
+        if (server_ram_val_)
+            lv_label_set_text(server_ram_val_, "AUTH");
+        if (server_disk_val_)
+            lv_label_set_text(server_disk_val_, "FAIL");
+        if (server_net_val_)
+            lv_label_set_text(server_net_val_, "401/403");
+        if (server_footer_label_) {
+            lv_label_set_text(server_footer_label_, "AUTH ERROR | BESZEL");
+            lv_obj_set_style_text_color(server_footer_label_, lv_color_hex(0xFF2D55), 0);
+        }
+        if (server_status_dot_) {
+            lv_obj_set_style_bg_color(server_status_dot_, lv_color_hex(0xFF2D55), 0);
+        }
+        if (server_arc_load_)
+            lv_arc_set_value(server_arc_load_, 0);
+        if (server_arc_ram_)
+            lv_arc_set_value(server_arc_ram_, 0);
+        if (server_arc_disk_)
+            lv_arc_set_value(server_arc_disk_, 0);
+        return;
+    }
+
+    if (beszel_status_ == ServiceStatus::kNetworkError) {
+        if (server_name_label_)
+            lv_label_set_text(server_name_label_, "网络不可达");
+        if (server_counter_label_)
+            lv_label_set_text(server_counter_label_, "[!/!]");
+        if (server_load_val_)
+            lv_label_set_text(server_load_val_, "ERR");
+        if (server_ram_val_)
+            lv_label_set_text(server_ram_val_, "NET");
+        if (server_disk_val_)
+            lv_label_set_text(server_disk_val_, "FAIL");
+        if (server_net_val_)
+            lv_label_set_text(server_net_val_, "TIMEOUT");
+        if (server_footer_label_) {
+            lv_label_set_text(server_footer_label_, "NET ERROR | BESZEL");
+            lv_obj_set_style_text_color(server_footer_label_, lv_color_hex(0xFF2D55), 0);
+        }
+        if (server_status_dot_) {
+            lv_obj_set_style_bg_color(server_status_dot_, lv_color_hex(0xFF2D55), 0);
+        }
+        if (server_arc_load_)
+            lv_arc_set_value(server_arc_load_, 0);
+        if (server_arc_ram_)
+            lv_arc_set_value(server_arc_ram_, 0);
+        if (server_arc_disk_)
+            lv_arc_set_value(server_arc_disk_, 0);
+        return;
+    }
+
+    if (vps_nodes_.empty()) {
+        if (server_name_label_)
+            lv_label_set_text(server_name_label_, "等待数据同步");
+        if (server_counter_label_)
+            lv_label_set_text(server_counter_label_, "[0/0]");
+        if (server_load_val_)
+            lv_label_set_text(server_load_val_, "--");
+        if (server_ram_val_)
+            lv_label_set_text(server_ram_val_, "--");
+        if (server_disk_val_)
+            lv_label_set_text(server_disk_val_, "--");
+        if (server_net_val_)
+            lv_label_set_text(server_net_val_, "--");
+        if (server_footer_label_) {
+            lv_label_set_text(server_footer_label_, "FETCHING | BESZEL");
+            lv_obj_set_style_text_color(server_footer_label_, lv_color_hex(0x00D2FF), 0);
+        }
+        if (server_status_dot_) {
+            lv_obj_set_style_bg_color(server_status_dot_, lv_color_hex(0x00F3FF), 0);
+        }
+        if (server_arc_load_)
+            lv_arc_set_value(server_arc_load_, 0);
+        if (server_arc_ram_)
+            lv_arc_set_value(server_arc_ram_, 0);
+        if (server_arc_disk_)
+            lv_arc_set_value(server_arc_disk_, 0);
+        return;
+    }
+
+    if (current_vps_idx_ >= vps_nodes_.size()) {
+        current_vps_idx_ = 0;
+    }
+
+    const auto& node = vps_nodes_[current_vps_idx_];
+
+    // 更新主机名
+    if (server_name_label_) {
+        lv_label_set_text(server_name_label_, node.name.c_str());
+    }
+
+    // 更新状态小圆点
+    if (server_status_dot_) {
+        if (node.status == "up") {
+            lv_obj_set_style_bg_color(server_status_dot_, lv_color_hex(0x00F3FF), 0);
+        } else {
+            lv_obj_set_style_bg_color(server_status_dot_, lv_color_hex(0xFF2D55), 0);
+        }
+    }
+
+    // 更新序号 [1/3]
+    if (server_counter_label_) {
+        char cnt_buf[32];
+        snprintf(cnt_buf, sizeof(cnt_buf), "[%zu/%zu]", current_vps_idx_ + 1, vps_nodes_.size());
+        lv_label_set_text(server_counter_label_, cnt_buf);
+    }
+
+    // 1. 更新 LOAD (数值与外圆弧)
+    if (server_load_val_) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.2f", node.load);
+        lv_label_set_text(server_load_val_, buf);
+    }
+    if (server_arc_load_) {
+        int load_pct = (int)(node.load * 25.0f);
+        if (load_pct > 100)
+            load_pct = 100;
+        if (load_pct < 0)
+            load_pct = 0;
+        lv_arc_set_value(server_arc_load_, load_pct);
+    }
+
+    // 2. 更新 RAM (中圆弧与数值)
+    if (server_ram_val_) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.1f%%", node.mem);
+        lv_label_set_text(server_ram_val_, buf);
+    }
+    if (server_arc_ram_) {
+        int ram_pct = (int)node.mem;
+        if (ram_pct > 100)
+            ram_pct = 100;
+        if (ram_pct < 0)
+            ram_pct = 0;
+        lv_arc_set_value(server_arc_ram_, ram_pct);
+    }
+
+    // 3. 更新 DISK (内圆弧与数值)
+    if (server_disk_val_) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.1f%%", node.disk);
+        lv_label_set_text(server_disk_val_, buf);
+    }
+    if (server_arc_disk_) {
+        int disk_pct = (int)node.disk;
+        if (disk_pct > 100)
+            disk_pct = 100;
+        if (disk_pct < 0)
+            disk_pct = 0;
+        lv_arc_set_value(server_arc_disk_, disk_pct);
+    }
+
+    // 4. 更新 NET SPEED
+    if (server_net_val_) {
+        char buf[24];
+        if (node.net_bytes_sec >= 1048576.0f) {
+            snprintf(buf, sizeof(buf), "%.1f MB/s", node.net_bytes_sec / 1048576.0f);
+        } else if (node.net_bytes_sec >= 1024.0f) {
+            snprintf(buf, sizeof(buf), "%.1f KB/s", node.net_bytes_sec / 1024.0f);
+        } else {
+            snprintf(buf, sizeof(buf), "%.0f B/s", node.net_bytes_sec);
+        }
+        lv_label_set_text(server_net_val_, buf);
+    }
+
+    // 5. 更新底部状态
+    if (server_footer_label_) {
+        if (node.status == "up") {
+            lv_label_set_text(server_footer_label_, "ONLINE  |  BESZEL HUD");
+            lv_obj_set_style_text_color(server_footer_label_, lv_color_hex(0x00D2FF), 0);
+        } else {
+            lv_label_set_text(server_footer_label_, "OFFLINE  |  BESZEL HUD");
+            lv_obj_set_style_text_color(server_footer_label_, lv_color_hex(0xFF5252), 0);
+        }
+    }
+}
+
+void CustomLcdDisplay::CheckAndTriggerServerFetch() {
+    auto& app = Application::GetInstance();
+    auto state = app.GetDeviceState();
+    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+        return;
+    }
+
+    if (beszel_hub_url_.empty() || beszel_user_.empty() || beszel_pass_.empty()) {
+        beszel_status_ = ServiceStatus::kUnconfigured;
+        return;  // 未配置状态绝不产生网络请求
+    }
+
+    int interval_s = beszel_fetch_interval_s_ > 0 ? beszel_fetch_interval_s_ : 15;
+
+    int64_t now_sec = esp_timer_get_time() / 1000000;
+    if (server_fetching_) {
+        return;
+    }
+
+    if (last_server_fetch_sec_ != 0 && (now_sec - last_server_fetch_sec_) < interval_s) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Triggering Beszel periodic fetch (interval: %ds)...", interval_s);
+    last_server_fetch_sec_ = now_sec;
+    server_fetching_ = true;
+
+    xTaskCreate(
+        [](void* arg) {
+            auto self = static_cast<CustomLcdDisplay*>(arg);
+            self->FetchBeszelData();
+            self->server_fetching_ = false;
+            ESP_LOGI(TAG, "Beszel fetch cycle completed.");
+            vTaskDelete(NULL);
+        },
+        "beszel_fetch", 6144, this, 1, nullptr);
+}
+
+void CustomLcdDisplay::FetchBeszelData() {
+    if (beszel_hub_url_.empty() || beszel_user_.empty() || beszel_pass_.empty()) {
+        beszel_status_ = ServiceStatus::kUnconfigured;
+        return;
+    }
+
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    if (!network) {
+        beszel_status_ = ServiceStatus::kNetworkError;
+        Application::GetInstance().Schedule([this]() {
+            if (current_page_ == 3 && server_ui_created_) {
+                UpdateServerUI();
+            }
+        });
+        return;
+    }
+
+    std::string safe_url = ServiceConfig::RedactUrl(beszel_hub_url_);
+    ESP_LOGI(TAG, "Fetching Beszel VPS Cluster data from %s...", safe_url.c_str());
+
+    // 1. 如果没有 token，或者上次请求被 401 拒绝，则先登录鉴权
+    if (beszel_token_.empty()) {
+        auto http_auth = network->CreateHttp(0);
+        if (http_auth) {
+            cJSON* auth_json = cJSON_CreateObject();
+            cJSON_AddStringToObject(auth_json, "identity", beszel_user_.c_str());
+            cJSON_AddStringToObject(auth_json, "password", beszel_pass_.c_str());
+            char* payload_str = cJSON_PrintUnformatted(auth_json);
+            std::string payload = payload_str ? payload_str : "";
+            cJSON_free(payload_str);
+            cJSON_Delete(auth_json);
+
+            http_auth->SetHeader("Content-Type", "application/json");
+            http_auth->SetContent(std::move(payload));
+            std::string auth_url = beszel_hub_url_ + "/api/collections/users/auth-with-password";
+            if (http_auth->Open("POST", auth_url)) {
+                auto status = http_auth->GetStatusCode();
+                ESP_LOGI(TAG, "Beszel auth HTTP status: %d", status ? *status : -1);
+                if (status && *status == 200) {
+                    std::string resp = http_auth->ReadAll();
+                    cJSON* root = cJSON_Parse(resp.c_str());
+                    if (root) {
+                        cJSON* tok = cJSON_GetObjectItem(root, "token");
+                        if (tok && tok->valuestring) {
+                            beszel_token_ = tok->valuestring;
+                            ESP_LOGI(TAG, "Beszel auth success, token acquired.");
+                        }
+                        cJSON_Delete(root);
+                    }
+                } else if (status && (*status == 400 || *status == 401 || *status == 403)) {
+                    ESP_LOGW(TAG, "Beszel auth failed (auth error), status: %d", *status);
+                    beszel_status_ = ServiceStatus::kAuthError;
+                } else {
+                    ESP_LOGW(TAG, "Beszel auth failed, status: %d", status ? *status : -1);
+                    beszel_status_ = ServiceStatus::kNetworkError;
+                }
+                http_auth->Close();
+            } else {
+                beszel_status_ = ServiceStatus::kNetworkError;
+            }
+        } else {
+            beszel_status_ = ServiceStatus::kNetworkError;
+        }
+    }
+
+    if (beszel_token_.empty()) {
+        Application::GetInstance().Schedule([this]() {
+            if (current_page_ == 3 && server_ui_created_) {
+                UpdateServerUI();
+            }
+        });
+        return;
+    }
+
+    // 2. 使用 Token 获取节点实时数据 (PocketBase 直接传 token，不能带 Bearer 前缀)
+    auto http_data = network->CreateHttp(0);
+    if (http_data) {
+        http_data->SetHeader("Authorization", beszel_token_);
+        std::string records_url = beszel_hub_url_ + "/api/collections/systems/records";
+        auto opened = http_data->Open("GET", records_url);
+        if (opened) {
+            auto status = http_data->GetStatusCode();
+            ESP_LOGI(TAG, "Beszel records HTTP status: %d", status ? *status : -1);
+            if (status && *status == 200) {
+                std::string body = http_data->ReadAll();
+                ESP_LOGI(TAG, "Beszel records body read (%zu bytes)", body.size());
+                beszel_status_ = ServiceStatus::kOk;
+                ParseAndApplyBeszel(body);
+            } else if (status && (*status == 401 || *status == 403)) {
+                ESP_LOGW(TAG, "Beszel token expired or forbidden, clearing token.");
+                beszel_token_.clear();
+                beszel_status_ = ServiceStatus::kAuthError;
+            } else {
+                ESP_LOGW(TAG, "Beszel fetch records failed, status: %d", status ? *status : -1);
+                beszel_status_ = ServiceStatus::kNetworkError;
+            }
+            http_data->Close();
+        } else {
+            ESP_LOGW(TAG, "Beszel Open GET records failed");
+            beszel_status_ = ServiceStatus::kNetworkError;
+        }
+    } else {
+        beszel_status_ = ServiceStatus::kNetworkError;
+    }
+
+    Application::GetInstance().Schedule([this]() {
+        if (current_page_ == 3 && server_ui_created_) {
+            UpdateServerUI();
+        }
+    });
+}
+
+void CustomLcdDisplay::ParseAndApplyBeszel(const std::string& body) {
+    cJSON* root = cJSON_Parse(body.c_str());
+    if (!root) {
+        ESP_LOGW(TAG, "Beszel JSON parse failed");
+        return;
+    }
+
+    cJSON* items = cJSON_GetObjectItem(root, "items");
+    if (items && cJSON_IsArray(items)) {
+        std::vector<VpsNode> new_nodes;
+        int count = cJSON_GetArraySize(items);
+        for (int i = 0; i < count; i++) {
+            cJSON* it = cJSON_GetArrayItem(items, i);
+            if (!it)
+                continue;
+            VpsNode node;
+            cJSON* name_item = cJSON_GetObjectItem(it, "name");
+            if (name_item && name_item->valuestring) {
+                node.name = name_item->valuestring;
+            }
+            cJSON* status_item = cJSON_GetObjectItem(it, "status");
+            if (status_item && status_item->valuestring) {
+                node.status = status_item->valuestring;
+            }
+            cJSON* host_item = cJSON_GetObjectItem(it, "host");
+            if (host_item && host_item->valuestring) {
+                node.host = host_item->valuestring;
+            }
+            cJSON* info = cJSON_GetObjectItem(it, "info");
+            if (info) {
+                // 1. 解析负载 la (1分钟平均负载)
+                cJSON* la_item = cJSON_GetObjectItem(info, "la");
+                if (la_item) {
+                    if (cJSON_IsArray(la_item) && cJSON_GetArraySize(la_item) > 0) {
+                        cJSON* first_la = cJSON_GetArrayItem(la_item, 0);
+                        if (first_la && cJSON_IsNumber(first_la)) {
+                            node.load = (float)first_la->valuedouble;
+                        }
+                    } else if (cJSON_IsNumber(la_item)) {
+                        node.load = (float)la_item->valuedouble;
+                    }
+                }
+                // 2. 解析实时网络带宽 bb (bytes/s)
+                cJSON* bb_item = cJSON_GetObjectItem(info, "bb");
+                if (bb_item && cJSON_IsNumber(bb_item)) {
+                    node.net_bytes_sec = (float)bb_item->valuedouble;
+                }
+                // 3. 解析内存百分比 mp
+                cJSON* mp_item = cJSON_GetObjectItem(info, "mp");
+                if (mp_item && cJSON_IsNumber(mp_item)) {
+                    node.mem = (float)mp_item->valuedouble;
+                }
+                // 4. 解析磁盘百分比 dp
+                cJSON* dp_item = cJSON_GetObjectItem(info, "dp");
+                if (dp_item && cJSON_IsNumber(dp_item)) {
+                    node.disk = (float)dp_item->valuedouble;
+                }
+                // 保留 CPU 字段
+                cJSON* cpu_item = cJSON_GetObjectItem(info, "cpu");
+                if (cpu_item && cJSON_IsNumber(cpu_item)) {
+                    node.cpu = (float)cpu_item->valuedouble;
+                }
+            }
+            new_nodes.push_back(node);
+        }
+
+        if (!new_nodes.empty()) {
+            ESP_LOGI(TAG, "Beszel parsed %d VPS nodes successfully", (int)new_nodes.size());
+            Application::GetInstance().Schedule([this, new_nodes = std::move(new_nodes)]() mutable {
+                DisplayLockGuard lock(this);
+                vps_nodes_ = std::move(new_nodes);
+                if (current_vps_idx_ >= vps_nodes_.size()) {
+                    current_vps_idx_ = 0;
+                }
+                if (current_page_ == 3 && server_ui_created_) {
+                    UpdateServerUI();
+                }
+            });
+        }
+    }
+    cJSON_Delete(root);
+}
+
+bool CustomLcdDisplay::ConfigureBeszel(const std::string& url, const std::string& user,
+                                       const std::string& pass, int32_t fetch_interval_s,
+                                       int32_t rotate_interval_s, std::string& err_msg) {
+    if (!service_config_) {
+        err_msg = "service config not initialized";
+        return false;
+    }
+    if (!service_config_->SetBeszelConfig(url, user, pass, fetch_interval_s, rotate_interval_s,
+                                          err_msg)) {
+        return false;
+    }
+    bool trigger_fetch = false;
+    {
+        DisplayLockGuard lock(this);
+        auto bsz_cfg = service_config_->GetBeszelConfig();
+        beszel_hub_url_ = bsz_cfg.url;
+        beszel_user_ = bsz_cfg.user;
+        beszel_pass_ = bsz_cfg.pass;
+        beszel_fetch_interval_s_ = bsz_cfg.fetch_interval_s;
+        beszel_rotate_interval_s_ = bsz_cfg.rotate_interval_s;
+        beszel_token_.clear();
+        beszel_status_ = bsz_cfg.IsConfigured() ? ServiceStatus::kOk : ServiceStatus::kUnconfigured;
+        if (!bsz_cfg.IsConfigured()) {
+            vps_nodes_.clear();
+            current_vps_idx_ = 0;
+        }
+        if (server_ui_created_) {
+            UpdateServerUI();
+        }
+        trigger_fetch = (beszel_status_ == ServiceStatus::kOk);
+    }
+    if (trigger_fetch) {
+        last_server_fetch_sec_ = 0;
+        CheckAndTriggerServerFetch();
+    }
+    return true;
+}
+
+void CustomLcdDisplay::TriggerBeszelFetch() {
+    last_server_fetch_sec_ = 0;
+    CheckAndTriggerServerFetch();
+}
+#endif

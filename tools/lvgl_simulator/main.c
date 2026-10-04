@@ -1,4 +1,11 @@
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+
 #include "lvgl.h"
 #include "src/drivers/sdl/lv_sdl_window.h"
 #include "src/drivers/sdl/lv_sdl_mouse.h"
@@ -6,10 +13,11 @@
 #include "src/libs/tiny_ttf/lv_tiny_ttf.h"
 #include "material_symbols.h"
 #include "player_icons.h"
+#if defined(__has_include) && __has_include(<SDL2/SDL.h>)
+#include <SDL2/SDL.h>
+#else
 #include <SDL.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
+#endif
 
 LV_FONT_DECLARE(font_noto_sans_basic_30_4);
 LV_FONT_DECLARE(font_noto_sans_basic_20_4);
@@ -18,6 +26,10 @@ LV_FONT_DECLARE(font_material_symbols_16_4);
 LV_FONT_DECLARE(font_material_symbols_30_4);
 LV_FONT_DECLARE(font_puhui_basic_20_4);
 LV_FONT_DECLARE(font_maison_neue_book_26);
+LV_FONT_DECLARE(font_maison_neue_book_14);
+LV_FONT_DECLARE(lv_font_montserrat_20);
+LV_FONT_DECLARE(lv_font_montserrat_30);
+LV_FONT_DECLARE(lv_font_unscii_16);
 
 static lv_font_t* font_huge = NULL;    // 34px (Time / Temp)
 static lv_font_t* font_large = NULL;   // 20px (Price / Value)
@@ -28,14 +40,18 @@ static lv_obj_t* page_home = NULL;
 static lv_obj_t* page_weather = NULL;
 static lv_obj_t* page_fonts = NULL;
 static lv_obj_t* page_player = NULL;
+static lv_obj_t* page_server = NULL;
 static lv_obj_t* dot_home = NULL;
 static lv_obj_t* dot_weather = NULL;
+static lv_obj_t* ind_box = NULL;
 static int current_page = 0;
 
 void SwitchPage(int page_idx) {
     current_page = page_idx;
     if (page_fonts) lv_obj_add_flag(page_fonts, LV_OBJ_FLAG_HIDDEN);
     if (page_player) lv_obj_add_flag(page_player, LV_OBJ_FLAG_HIDDEN);
+    if (page_server) lv_obj_add_flag(page_server, LV_OBJ_FLAG_HIDDEN);
+    if (ind_box) lv_obj_remove_flag(ind_box, LV_OBJ_FLAG_HIDDEN);
     if (page_idx == 0) {
         lv_obj_remove_flag(page_home, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(page_weather, LV_OBJ_FLAG_HIDDEN);
@@ -66,6 +82,12 @@ void SwitchPage(int page_idx) {
         if (page_home) lv_obj_add_flag(page_home, LV_OBJ_FLAG_HIDDEN);
         if (page_weather) lv_obj_add_flag(page_weather, LV_OBJ_FLAG_HIDDEN);
         if (page_player) lv_obj_remove_flag(page_player, LV_OBJ_FLAG_HIDDEN);
+    } else if (page_idx == 4) {
+        if (page_home) lv_obj_add_flag(page_home, LV_OBJ_FLAG_HIDDEN);
+        if (page_weather) lv_obj_add_flag(page_weather, LV_OBJ_FLAG_HIDDEN);
+        if (page_player) lv_obj_add_flag(page_player, LV_OBJ_FLAG_HIDDEN);
+        if (page_server) lv_obj_remove_flag(page_server, LV_OBJ_FLAG_HIDDEN);
+        if (ind_box) lv_obj_add_flag(ind_box, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -880,6 +902,240 @@ static void LoadChineseFonts() {
     font_small = lv_tiny_ttf_create_data(font_buffer, size, 12);
 }
 
+void BuildServerPage(lv_obj_t* parent) {
+    page_server = lv_obj_create(parent);
+    lv_obj_set_size(page_server, 360, 360);
+    lv_obj_set_pos(page_server, 0, 0);
+    lv_obj_set_style_bg_color(page_server, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(page_server, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(page_server, 0, 0);
+    lv_obj_set_style_pad_all(page_server, 0, 0);
+    lv_obj_set_style_radius(page_server, 180, 0);
+    lv_obj_remove_flag(page_server, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 1. 外圈精密刻度装饰环 (Outer Precision Bezel Track, D: 346)
+    lv_obj_t* outer_track = lv_obj_create(page_server);
+    lv_obj_set_size(outer_track, 346, 346);
+    lv_obj_align(outer_track, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_opa(outer_track, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(outer_track, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(outer_track, 1, 0);
+    lv_obj_set_style_border_opa(outer_track, 50, 0);
+    lv_obj_set_style_radius(outer_track, 173, 0);
+    lv_obj_remove_flag(outer_track, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 1.1 四向准星刻度线 (Cardinal Precision Line Ticks, 12点/6点/9点/3点)
+    lv_obj_t* tick_top = lv_obj_create(page_server);
+    lv_obj_set_size(tick_top, 2, 7);
+    lv_obj_align(tick_top, LV_ALIGN_TOP_MID, 0, 4);
+    lv_obj_set_style_bg_color(tick_top, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(tick_top, 0, 0);
+
+    lv_obj_t* tick_bot = lv_obj_create(page_server);
+    lv_obj_set_size(tick_bot, 2, 7);
+    lv_obj_align(tick_bot, LV_ALIGN_BOTTOM_MID, 0, -4);
+    lv_obj_set_style_bg_color(tick_bot, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(tick_bot, 0, 0);
+
+    lv_obj_t* tick_left = lv_obj_create(page_server);
+    lv_obj_set_size(tick_left, 7, 2);
+    lv_obj_align(tick_left, LV_ALIGN_LEFT_MID, 4, 0);
+    lv_obj_set_style_bg_color(tick_left, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(tick_left, 0, 0);
+
+    lv_obj_t* tick_right = lv_obj_create(page_server);
+    lv_obj_set_size(tick_right, 7, 2);
+    lv_obj_align(tick_right, LV_ALIGN_RIGHT_MID, -4, 0);
+    lv_obj_set_style_bg_color(tick_right, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(tick_right, 0, 0);
+
+    // 2. 同心三环 (Concentric Rings: Arc Engine)
+    // 2.1 RING 1 (OUTER): LOAD (D: 326, R: 163, stroke: 6)
+    lv_obj_t* arc_load = lv_arc_create(page_server);
+    lv_obj_set_size(arc_load, 326, 326);
+    lv_obj_align(arc_load, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_rotation(arc_load, 270);
+    lv_arc_set_bg_angles(arc_load, 0, 360);
+    lv_arc_set_range(arc_load, 0, 100);
+    lv_arc_set_value(arc_load, 85);
+    lv_obj_remove_style(arc_load, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(arc_load, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(arc_load, 6, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc_load, lv_color_hex(0x350A15), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc_load, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc_load, lv_color_hex(0xFF2D55), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(arc_load, true, LV_PART_INDICATOR);
+
+    // 2.2 RING 2 (MIDDLE): RAM USAGE (D: 300, R: 150, stroke: 5)
+    lv_obj_t* arc_ram = lv_arc_create(page_server);
+    lv_obj_set_size(arc_ram, 300, 300);
+    lv_obj_align(arc_ram, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_rotation(arc_ram, 270);
+    lv_arc_set_bg_angles(arc_ram, 0, 360);
+    lv_arc_set_range(arc_ram, 0, 100);
+    lv_arc_set_value(arc_ram, 77);
+    lv_obj_remove_style(arc_ram, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(arc_ram, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(arc_ram, 5, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc_ram, lv_color_hex(0x05263D), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc_ram, 5, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc_ram, lv_color_hex(0x00F3FF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(arc_ram, true, LV_PART_INDICATOR);
+
+    // 2.3 RING 3 (INNER): DISK USAGE (D: 274, R: 137, stroke: 5 - 放大的最内环)
+    lv_obj_t* arc_disk = lv_arc_create(page_server);
+    lv_obj_set_size(arc_disk, 274, 274);
+    lv_obj_align(arc_disk, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_rotation(arc_disk, 270);
+    lv_arc_set_bg_angles(arc_disk, 0, 360);
+    lv_arc_set_range(arc_disk, 0, 100);
+    lv_arc_set_value(arc_disk, 35);
+    lv_obj_remove_style(arc_disk, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(arc_disk, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(arc_disk, 5, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc_disk, lv_color_hex(0x28103E), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc_disk, 5, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc_disk, lv_color_hex(0xB054FF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(arc_disk, true, LV_PART_INDICATOR);
+
+    // 内环装饰细虚圈 (D: 252)
+    lv_obj_t* inner_deco = lv_obj_create(page_server);
+    lv_obj_set_size(inner_deco, 252, 252);
+    lv_obj_align(inner_deco, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_opa(inner_deco, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(inner_deco, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(inner_deco, 1, 0);
+    lv_obj_set_style_border_opa(inner_deco, 40, 0);
+    lv_obj_set_style_radius(inner_deco, 126, 0);
+    lv_obj_remove_flag(inner_deco, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 3. PURE DATA MINIMAL CORE (中心内容区: w: 210, h: 210)
+    lv_obj_t* core = lv_obj_create(page_server);
+    lv_obj_set_size(core, 210, 210);
+    lv_obj_align(core, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_opa(core, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(core, 0, 0);
+    lv_obj_set_style_pad_all(core, 0, 0);
+    lv_obj_remove_flag(core, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 3.1 TOP MICRO HEADER: ● US-CN2GIA [1/3]
+    lv_obj_t* hdr_box = lv_obj_create(core);
+    lv_obj_set_size(hdr_box, 200, 20);
+    lv_obj_align(hdr_box, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_set_style_bg_opa(hdr_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(hdr_box, 0, 0);
+    lv_obj_set_style_pad_all(hdr_box, 0, 0);
+    lv_obj_set_flex_flow(hdr_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(hdr_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(hdr_box, 6, 0);
+    lv_obj_remove_flag(hdr_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* dot = lv_obj_create(hdr_box);
+    lv_obj_set_size(dot, 6, 6);
+    lv_obj_set_style_radius(dot, 3, 0);
+    lv_obj_set_style_bg_color(dot, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(dot, 0, 0);
+
+    lv_obj_t* name_lbl = lv_label_create(hdr_box);
+    lv_obj_set_style_text_font(name_lbl, (lv_font_t*)&font_noto_sans_basic_16_4, 0);
+    lv_obj_set_style_text_color(name_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(name_lbl, "US-CN2GIA");
+
+    lv_obj_t* cnt_lbl = lv_label_create(hdr_box);
+    lv_obj_set_style_text_font(cnt_lbl, (lv_font_t*)&font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(cnt_lbl, lv_color_hex(0x00F3FF), 0);
+    lv_label_set_text(cnt_lbl, "[1/3]");
+
+    // 3.2 HERO LOAD METRIC (3.82 / SYSTEM LOAD)
+    lv_obj_t* load_num = lv_label_create(core);
+    lv_obj_set_style_text_font(load_num, (lv_font_t*)&font_maison_neue_book_26, 0);
+    lv_obj_set_style_text_color(load_num, lv_color_hex(0xFF2D55), 0);
+    lv_label_set_text(load_num, "3.82");
+    lv_obj_align(load_num, LV_ALIGN_TOP_MID, 0, 32);
+
+    lv_obj_t* load_tag = lv_label_create(core);
+    lv_obj_set_style_text_font(load_tag, (lv_font_t*)&font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(load_tag, lv_color_hex(0xFF6B8B), 0);
+    lv_label_set_text(load_tag, "SYSTEM LOAD");
+    lv_obj_align(load_tag, LV_ALIGN_TOP_MID, 0, 64);
+
+    // 3.3 THREE-LINE COMPACT TELEMETRY MATRIX
+    lv_obj_t* matrix = lv_obj_create(core);
+    lv_obj_set_size(matrix, 172, 60);
+    lv_obj_align(matrix, LV_ALIGN_TOP_MID, 0, 88);
+    lv_obj_set_style_bg_opa(matrix, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(matrix, 0, 0);
+    lv_obj_set_style_pad_all(matrix, 0, 0);
+    lv_obj_remove_flag(matrix, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Line 1: RAM
+    lv_obj_t* r1_dot = lv_obj_create(matrix);
+    lv_obj_set_size(r1_dot, 4, 4);
+    lv_obj_set_style_radius(r1_dot, 2, 0);
+    lv_obj_set_style_bg_color(r1_dot, lv_color_hex(0x00F3FF), 0);
+    lv_obj_set_style_border_width(r1_dot, 0, 0);
+    lv_obj_align(r1_dot, LV_ALIGN_TOP_LEFT, 0, 6);
+
+    lv_obj_t* r1_lbl = lv_label_create(matrix);
+    lv_obj_set_style_text_font(r1_lbl, (lv_font_t*)&font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(r1_lbl, lv_color_hex(0x00F3FF), 0);
+    lv_label_set_text(r1_lbl, "RAM");
+    lv_obj_align(r1_lbl, LV_ALIGN_TOP_LEFT, 10, 0);
+
+    lv_obj_t* r1_val = lv_label_create(matrix);
+    lv_obj_set_style_text_font(r1_val, (lv_font_t*)&font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(r1_val, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(r1_val, "77.4%");
+    lv_obj_align(r1_val, LV_ALIGN_TOP_RIGHT, 0, 0);
+
+    // Line 2: DISK
+    lv_obj_t* r2_dot = lv_obj_create(matrix);
+    lv_obj_set_size(r2_dot, 4, 4);
+    lv_obj_set_style_radius(r2_dot, 2, 0);
+    lv_obj_set_style_bg_color(r2_dot, lv_color_hex(0xB054FF), 0);
+    lv_obj_set_style_border_width(r2_dot, 0, 0);
+    lv_obj_align(r2_dot, LV_ALIGN_TOP_LEFT, 0, 24);
+
+    lv_obj_t* r2_lbl = lv_label_create(matrix);
+    lv_obj_set_style_text_font(r2_lbl, (lv_font_t*)&font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(r2_lbl, lv_color_hex(0xB054FF), 0);
+    lv_label_set_text(r2_lbl, "DISK");
+    lv_obj_align(r2_lbl, LV_ALIGN_TOP_LEFT, 10, 18);
+
+    lv_obj_t* r2_val = lv_label_create(matrix);
+    lv_obj_set_style_text_font(r2_val, (lv_font_t*)&font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(r2_val, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(r2_val, "34.6%");
+    lv_obj_align(r2_val, LV_ALIGN_TOP_RIGHT, 0, 18);
+
+    // Line 3: NET
+    lv_obj_t* r3_dot = lv_obj_create(matrix);
+    lv_obj_set_size(r3_dot, 4, 4);
+    lv_obj_set_style_radius(r3_dot, 2, 0);
+    lv_obj_set_style_bg_color(r3_dot, lv_color_hex(0x4EDEA3), 0);
+    lv_obj_set_style_border_width(r3_dot, 0, 0);
+    lv_obj_align(r3_dot, LV_ALIGN_TOP_LEFT, 0, 42);
+
+    lv_obj_t* r3_lbl = lv_label_create(matrix);
+    lv_obj_set_style_text_font(r3_lbl, (lv_font_t*)&font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(r3_lbl, lv_color_hex(0x4EDEA3), 0);
+    lv_label_set_text(r3_lbl, "NET");
+    lv_obj_align(r3_lbl, LV_ALIGN_TOP_LEFT, 10, 36);
+
+    lv_obj_t* r3_val = lv_label_create(matrix);
+    lv_obj_set_style_text_font(r3_val, (lv_font_t*)&font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(r3_val, lv_color_hex(0x4EDEA3), 0);
+    lv_label_set_text(r3_val, "841.5 KB/s");
+    lv_obj_align(r3_val, LV_ALIGN_TOP_RIGHT, 0, 36);
+
+    // 3.4 BOTTOM FOOTER: UP | BESZEL HUD
+    lv_obj_t* footer = lv_label_create(core);
+    lv_obj_set_style_text_font(footer, (lv_font_t*)&font_maison_neue_book_14, 0);
+    lv_obj_set_style_text_color(footer, lv_color_hex(0x00D2FF), 0);
+    lv_label_set_text(footer, "ONLINE  |  BESZEL HUD");
+    lv_obj_align(footer, LV_ALIGN_TOP_MID, 0, 166);
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     lv_init();
@@ -906,9 +1162,10 @@ int main(int argc, char** argv) {
     BuildWeatherPage(screen);
     BuildFontShowcasePage(screen);
     BuildPlayerPage(screen);
+    BuildServerPage(screen);
 
     // Indicator
-    lv_obj_t* ind_box = lv_obj_create(screen);
+    ind_box = lv_obj_create(screen);
     lv_obj_set_size(ind_box, 100, 30);
     lv_obj_align(ind_box, LV_ALIGN_BOTTOM_MID, 0, -6);
     lv_obj_set_style_bg_opa(ind_box, LV_OPA_TRANSP, 0);
@@ -1000,6 +1257,13 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 20; i++) { lv_timer_handler(); SDL_Delay(10); }
     lv_refr_now(disp);
     SaveScreen("preview_player_paused.png");
+
+    // 服务器集群监控看板页 (Beszel Server Monitor HUD)
+    SwitchPage(4);
+    lv_obj_invalidate(screen);
+    for (int i = 0; i < 20; i++) { lv_timer_handler(); SDL_Delay(10); }
+    lv_refr_now(disp);
+    SaveScreen("preview_server_monitor.png");
 
     SwitchPage(0);
     lv_obj_invalidate(screen);

@@ -1452,6 +1452,11 @@ def _configure_build(
     if Path("sdkconfig.defaults").exists():
         defaults.append("sdkconfig.defaults")
     defaults.append(fragment.as_posix())
+    override_env = os.environ.get("SDKCONFIG_OVERRIDE")
+    if override_env and Path(override_env).exists():
+        defaults.append(Path(override_env).as_posix())
+    elif Path("sdkconfig.override").exists():
+        defaults.append("sdkconfig.override")
     _run_idf(
         f"-DIDF_TARGET={target}",
         f"-DSDKCONFIG_DEFAULTS={';'.join(defaults)}",

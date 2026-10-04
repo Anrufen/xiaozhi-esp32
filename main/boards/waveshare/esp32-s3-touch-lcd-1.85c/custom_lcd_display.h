@@ -1,11 +1,16 @@
 #ifndef CUSTOM_LCD_DISPLAY_H
 #define CUSTOM_LCD_DISPLAY_H
 
-#include <string>
-#include <vector>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "display/lcd_display.h"
+#include "service_config.h"
+
+enum class ServiceStatus { kUnconfigured, kOk, kConnected = kOk, kAuthError, kNetworkError };
 
 struct TomorrowWeather {
     std::string city = "成都市 · 武侯区";
@@ -48,6 +53,19 @@ struct MusicTrack {
     uint32_t duration_sec = 180;
 };
 
+#if CONFIG_WS185C_ENABLE_BESZEL
+struct VpsNode {
+    std::string name = "";
+    std::string host = "";
+    std::string status = "up";
+    float load = 0.0f;           // 1分钟平均系统负载 (info.la[0])
+    float net_bytes_sec = 0.0f;  // 实时网络带宽 bytes/s (info.bb)
+    float mem = 0.0f;            // 内存占用率 % (info.mp)
+    float disk = 0.0f;           // 磁盘占用率 % (info.dp)
+    float cpu = 0.0f;
+};
+#endif
+
 class CustomLcdDisplay : public SpiLcdDisplay {
 public:
     CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width,
@@ -65,19 +83,40 @@ public:
     void ShowHomePage();
     void ShowPlayerPage();
     void ShowSettingsPage();
+    void ShowServerPage();
 
     // 触发刷新股票与天气（供外部/MCP或定时逻辑调用）
     void FetchStockData();
     void FetchWeatherData();
-    void SetNavidromeServer(const std::string& url);
+
+    std::shared_ptr<waveshare185c::ServiceConfig> GetServiceConfig() const {
+        return service_config_;
+    }
+
+#if CONFIG_WS185C_ENABLE_NAVIDROME
+    bool ConfigureNavidrome(const std::string& url, const std::string& user,
+                            const std::string& pass, std::string& err_msg);
     void FetchNavidromePlaylist();
 
     // 播放器控制（屏幕与语音MCP通用）
     void OnPlayerPlayPauseClicked();
     void OnPlayerPrevClicked();
     void OnPlayerNextClicked();
+#endif
+
+#if CONFIG_WS185C_ENABLE_BESZEL
+    bool ConfigureBeszel(const std::string& url, const std::string& user, const std::string& pass,
+                         int32_t fetch_interval_s, int32_t rotate_interval_s, std::string& err_msg);
+    // VPS 节点控制与数据同步
+    void NextVpsNode();
+    void PrevVpsNode();
+    void TriggerBeszelFetch();
+    void FetchBeszelData();
+#endif
 
 private:
+    std::shared_ptr<waveshare185c::ServiceConfig> service_config_;
+
     // 首屏定制：赛博朋克极客 HUD 表盘（Clock & Stocks）
     void SetupHomeDashboardUI();
     void UpdateHomeClock();
@@ -142,6 +181,20 @@ private:
     lv_obj_t* dot_home_ = nullptr;
     lv_obj_t* dot_weather_ = nullptr;
 
+    // 懒加载第四屏：下拉快捷控制中心（Cyber Quick Settings）
+    void EnsureSettingsUI();
+    void UpdateSettingsValues();
+
+    lv_obj_t* settings_overlay_ = nullptr;
+    bool settings_ui_created_ = false;
+    lv_obj_t* brightness_slider_ = nullptr;
+    lv_obj_t* brightness_val_label_ = nullptr;
+    lv_obj_t* volume_slider_ = nullptr;
+    lv_obj_t* volume_val_label_ = nullptr;
+    lv_obj_t* settings_wifi_label_ = nullptr;
+    lv_obj_t* settings_navidrome_label_ = nullptr;
+
+#if CONFIG_WS185C_ENABLE_NAVIDROME
     // 懒加载第三屏：极客机能音乐播放器（Cyber HUD Music Player）
     void EnsurePlayerUI();
     void UpdatePlayerUI();
@@ -171,23 +224,11 @@ private:
     void UpdatePlayerAnimation();
     void SetPlayerAnimationActive(bool active);
 
-    // 懒加载第四屏：下拉快捷控制中心（Cyber Quick Settings）
-    void EnsureSettingsUI();
-    void UpdateSettingsValues();
-
-    lv_obj_t* settings_overlay_ = nullptr;
-    bool settings_ui_created_ = false;
-    lv_obj_t* brightness_slider_ = nullptr;
-    lv_obj_t* brightness_val_label_ = nullptr;
-    lv_obj_t* volume_slider_ = nullptr;
-    lv_obj_t* volume_val_label_ = nullptr;
-    lv_obj_t* settings_wifi_label_ = nullptr;
-    lv_obj_t* settings_navidrome_label_ = nullptr;
-
     // Navidrome 配置与流媒体
-    std::string navidrome_server_ = "http://192.168.2.14:1011";
-    std::string navidrome_user_ = "admin";
-    std::string navidrome_pass_ = "music.123.123.z";
+    ServiceStatus navidrome_status_ = ServiceStatus::kUnconfigured;
+    std::string navidrome_server_;
+    std::string navidrome_user_;
+    std::string navidrome_pass_;
     std::string navidrome_token_ = "";
     std::string navidrome_salt_ = "";
     bool navidrome_fetching_ = false;
@@ -204,6 +245,9 @@ private:
     size_t current_track_idx_ = 0;
     bool is_playing_ = false;
     uint32_t play_elapsed_sec_ = 0;
+#else
+    inline void SetPlayerAnimationActive(bool /*active*/) {}
+#endif
 
     TomorrowWeather current_weather_;
     StockData current_stock_;
@@ -219,6 +263,46 @@ private:
     int64_t last_weather_fetch_sec_ = 0;
     bool weather_fetching_ = false;
     bool in_config_mode_cached_ = false;
+
+#if CONFIG_WS185C_ENABLE_BESZEL
+    // 懒加载第五屏：Beszel VPS 集群监控看板（Cyber Server Telemetry）
+    ServiceStatus beszel_status_ = ServiceStatus::kUnconfigured;
+    void EnsureServerUI();
+    void UpdateServerUI();
+    void CheckAndTriggerServerFetch();
+    void ParseAndApplyBeszel(const std::string& body);
+
+    lv_obj_t* server_overlay_ = nullptr;
+    bool server_ui_created_ = false;
+
+    // 同心三环 HUD 控件
+    lv_obj_t* server_arc_load_ = nullptr;
+    lv_obj_t* server_arc_ram_ = nullptr;
+    lv_obj_t* server_arc_disk_ = nullptr;
+
+    // 核心信息区控件
+    lv_obj_t* server_status_dot_ = nullptr;
+    lv_obj_t* server_name_label_ = nullptr;
+    lv_obj_t* server_counter_label_ = nullptr;
+    lv_obj_t* server_load_val_ = nullptr;
+    lv_obj_t* server_ram_val_ = nullptr;
+    lv_obj_t* server_disk_val_ = nullptr;
+    lv_obj_t* server_net_val_ = nullptr;
+    lv_obj_t* server_footer_label_ = nullptr;
+
+    std::vector<VpsNode> vps_nodes_;
+    size_t current_vps_idx_ = 0;
+    uint32_t vps_carousel_counter_ = 0;
+
+    std::string beszel_hub_url_;
+    std::string beszel_user_;
+    std::string beszel_pass_;
+    int32_t beszel_fetch_interval_s_ = 15;
+    int32_t beszel_rotate_interval_s_ = 5;
+    std::string beszel_token_ = "";
+    int64_t last_server_fetch_sec_ = 0;
+    bool server_fetching_ = false;
+#endif
 };
 
 #endif  // CUSTOM_LCD_DISPLAY_H

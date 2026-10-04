@@ -496,7 +496,8 @@ private:
         mcp_server.AddTool(
             "self.weather.switch_page",
             "切换屏幕展示页面：page 为 'player' 切换到音乐播放器，page 为 'weather' "
-            "切换到明天天气窗口，page 为 'settings' 切换到控制中心，page 为 'home' 切换回主页时钟与表情",
+            "切换到明天天气窗口，page 为 'settings' 切换到控制中心，page 为 'server' "
+            "切换到集群监控，page 为 'home' 切换回主页时钟与表情",
             PropertyList({Property("page", kPropertyTypeString, std::string("weather"))}),
             [this](const PropertyList& properties) -> ReturnValue {
                 std::string page = properties["page"].value<std::string>();
@@ -506,57 +507,88 @@ private:
                     display_->ShowWeatherPage();
                 } else if (page == "settings") {
                     display_->ShowSettingsPage();
+                } else if (page == "server") {
+                    display_->ShowServerPage();
                 } else {
                     display_->ShowHomePage();
                 }
                 return true;
             });
 
+#if CONFIG_WS185C_ENABLE_NAVIDROME
         mcp_server.AddTool(
             "self.navidrome.set_server",
-            "配置 Navidrome 音乐服务器地址（如 http://192.168.2.14:1011）并更新控制中心显示",
-            PropertyList({Property("url", kPropertyTypeString, std::string("http://192.168.2.14:1011"))}),
+            "配置 Navidrome 音乐服务器（url 必填，user 和 password 可选），保存到 NVS 并立即生效",
+            PropertyList({Property("url", kPropertyTypeString, std::string("")),
+                          Property("user", kPropertyTypeString, std::string("")),
+                          Property("password", kPropertyTypeString, std::string(""))}),
             [this](const PropertyList& properties) -> ReturnValue {
                 std::string url = properties["url"].value<std::string>();
-                display_->SetNavidromeServer(url);
-                return true;
+                std::string user = properties["user"].value<std::string>();
+                std::string pass = properties["password"].value<std::string>();
+                std::string err_msg;
+                bool ok = display_->ConfigureNavidrome(url, user, pass, err_msg);
+                if (!ok) {
+                    return std::string("Error: " + err_msg);
+                }
+                return std::string("Navidrome configuration updated and saved to NVS");
             });
 
+        mcp_server.AddTool("self.music.play_pause", "播放或暂停当前 Navidrome 音乐", PropertyList(),
+                           [this](const PropertyList& properties) -> ReturnValue {
+                               display_->OnPlayerPlayPauseClicked();
+                               return true;
+                           });
+
+        mcp_server.AddTool("self.music.next", "切换到下一首 Navidrome 音乐", PropertyList(),
+                           [this](const PropertyList& properties) -> ReturnValue {
+                               display_->OnPlayerNextClicked();
+                               return true;
+                           });
+
+        mcp_server.AddTool("self.music.prev", "切换到上一首 Navidrome 音乐", PropertyList(),
+                           [this](const PropertyList& properties) -> ReturnValue {
+                               display_->OnPlayerPrevClicked();
+                               return true;
+                           });
+
+        mcp_server.AddTool("self.music.refresh", "从 Navidrome 重新随机拉取最新曲库",
+                           PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+                               display_->FetchNavidromePlaylist();
+                               return true;
+                           });
+#endif
+
+#if CONFIG_WS185C_ENABLE_BESZEL
         mcp_server.AddTool(
-            "self.music.play_pause",
-            "播放或暂停当前 Navidrome 音乐",
-            PropertyList(),
+            "self.beszel.set_server",
+            "配置 Beszel VPS 集群监控 Hub 参数，保存到 NVS 并立即生效（password 不回显）",
+            PropertyList({Property("url", kPropertyTypeString, std::string("")),
+                          Property("user", kPropertyTypeString, std::string("")),
+                          Property("password", kPropertyTypeString, std::string("")),
+                          Property("fetch_interval", kPropertyTypeInteger, 15),
+                          Property("carousel_interval", kPropertyTypeInteger, 5)}),
             [this](const PropertyList& properties) -> ReturnValue {
-                display_->OnPlayerPlayPauseClicked();
-                return true;
+                std::string url = properties["url"].value<std::string>();
+                std::string user = properties["user"].value<std::string>();
+                std::string pass = properties["password"].value<std::string>();
+                int fetch_interval = properties["fetch_interval"].value<int>();
+                int carousel_interval = properties["carousel_interval"].value<int>();
+                std::string err_msg;
+                bool ok = display_->ConfigureBeszel(url, user, pass, fetch_interval,
+                                                    carousel_interval, err_msg);
+                if (!ok) {
+                    return std::string("Error: " + err_msg);
+                }
+                return std::string("Beszel configuration updated and saved to NVS");
             });
 
-        mcp_server.AddTool(
-            "self.music.next",
-            "切换到下一首 Navidrome 音乐",
-            PropertyList(),
-            [this](const PropertyList& properties) -> ReturnValue {
-                display_->OnPlayerNextClicked();
-                return true;
-            });
-
-        mcp_server.AddTool(
-            "self.music.prev",
-            "切换到上一首 Navidrome 音乐",
-            PropertyList(),
-            [this](const PropertyList& properties) -> ReturnValue {
-                display_->OnPlayerPrevClicked();
-                return true;
-            });
-
-        mcp_server.AddTool(
-            "self.music.refresh",
-            "从 Navidrome 重新随机拉取最新曲库",
-            PropertyList(),
-            [this](const PropertyList& properties) -> ReturnValue {
-                display_->FetchNavidromePlaylist();
-                return true;
-            });
+        mcp_server.AddTool("self.beszel.refresh", "触发立即重新拉取 Beszel VPS 集群遥测数据",
+                           PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+                               display_->TriggerBeszelFetch();
+                               return true;
+                           });
+#endif
     }
 
 public:

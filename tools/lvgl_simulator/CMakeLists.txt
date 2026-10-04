@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(lvgl_sim C)
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 execute_process(COMMAND sdl2-config --cflags OUTPUT_VARIABLE SDL2_CFLAGS OUTPUT_STRIP_TRAILING_WHITESPACE)
 execute_process(COMMAND sdl2-config --libs OUTPUT_VARIABLE SDL2_LDFLAGS OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -29,6 +30,7 @@ set(FONT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../managed_components/78__xiaozhi-fonts/src/font_material_symbols_30_4.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../managed_components/espressif2022__esp_emote_expression/src/default_assets/font_puhui_basic_20_4.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../managed_components/espressif2022__esp_emote_expression/src/default_assets/font_maison_neue_book_26.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/boards/waveshare/esp32-s3-touch-lcd-1.85c/font_maison_neue_book_14.c
 )
 
 add_executable(lvgl_sim
