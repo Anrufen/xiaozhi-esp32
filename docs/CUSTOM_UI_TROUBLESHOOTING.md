@@ -468,6 +468,61 @@
 
 ---
 
+## 十三、第三方扩展服务（Navidrome/Beszel）配置架构、安全防泄露与线程安全设计原则
+
+在引入个人私有云音乐（Navidrome/Subsonic）与服务器集群探针监控（Beszel）等第三方网络服务后，固件架构面临配置冲突、密码泄露、增量更新覆盖、心跳性能抖动及跨线程 UI 崩溃等多维挑战。为确保代码架构整洁与系统稳健，必须严格遵循以下设计与约束原则：
+
+### 19. 架构隔离与集中式 Kconfig 依赖原则（Zero Intrusion）
+1. **板级隔离，严禁侵入核心通用层**：
+   - 所有的第三方服务开关宏（如 `CONFIG_WS185C_ENABLE_NAVIDROME`、`CONFIG_WS185C_ENABLE_BESZEL`）及默认凭据参数，必须统一定义在板级专有 Kconfig 区域（例如 `main/Kconfig.projbuild` 中对应 `BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C` 的 `menuconfig` 块下）；
+   - 严禁在 `main/application.cc`、`main/protocols/` 等核心通用业务模块中直接引入板级私有配置头文件或宏，保持 Core 与 Board 的解耦。
+2. **宏命名空间规范**：
+   - 所有板级私有宏统一冠以板级前缀 `CONFIG_WS185C_*`，杜绝与其他板卡或 ESP-IDF 官方组件发生命名碰撞。
+
+### 20. 多级配置生命周期与优先级准则（NVS Over Kconfig）
+1. **多级覆盖策略**：
+   - 系统采用 **运行时 NVS 持久化值 > Kconfig 编译默认值** 的两级生效模型；
+   - **冷启动读取**：板级初始化时优先从 NVS（命名空间 `waveshare185c`）中读取持久化凭据；仅当 NVS 中对应键不存在或未设置时，才回退并采用 Kconfig 预置的固件默认值；
+   - **动态更新即时持久化**：用户通过语音/MCP 工具修改配置后，立即写入 NVS，下次开机自动复用最新配置，无需重新编译烧录固件。
+2. **NVS Key 长度与命名空间隔离**：
+   - ESP-IDF NVS 键名长度严格限制在 15 字符以内；
+   - 统一使用紧凑命名：Navidrome 使用 `navi_url`、`navi_user`、`navi_pass`；Beszel 使用 `bsz_url`、`bsz_user`、`bsz_pass`、`bsz_fetch_s`、`bsz_rotate_s`。
+
+### 21. 敏感凭据工程防泄露三层防护机制（Security Best Practices）
+1. **第一层：代码库零明文（Zero Secrets in VCS）**：
+   - Git 追踪的源文件（`Kconfig.projbuild`、C/C++ 代码、示例文档）中，默认值必须使用通用占位符（如 `http://your-server-ip:port`、`admin`、`password`），严禁写入真实内网 IP、公网域名与密码。
+2. **第二层：本地配置自动重载（`sdkconfig.override`）**：
+   - 开发自用或批量固件预设的真实账号密码，写入根目录的 [sdkconfig.override](file:///Users/anrufen/app/xiaozhi-esp32/sdkconfig.override)；
+   - 该文件必须加入 `.gitignore`，既能使 `python3 scripts/build.py` 在编译时自动融合本地真实配置，又能从物理层面 100% 杜绝意外提交泄露。
+3. **第三层：CI / 提交前敏感词静态扫描门禁**：
+   - 维护专用静态检查脚本（如 `python3 scripts/scan_secrets.py`），对即将发布的源码与 Commit 进行高危敏感词/IP 模式扫描，形成安全防线。
+
+### 22. 增量更新与防静默擦除防呆机制（Safe Partial Update）
+1. **凭据保留原则（Preserve Existing Credentials）**：
+   - 在 MCP 工具（如 `self.navidrome.set_server`）处理请求时，若用户仅指定修改 `url`，未传递 `username` 或 `password`，工具处理函数**严禁将未传字段覆盖为空字符串**；
+   - 必须先读取现有 NVS 或当前配置，在保留旧密码的前提下仅更新目标字段，避免用户调参导致鉴权静默失效。
+2. **输入防御性校验与 URL 规整化**：
+   - 强制拦截并拒绝非法空字符串 URL；
+   - 自动清洗 URL 尾部的斜杠 `/`（如将 `http://192.168.1.10:8090/` 规整为 `http://192.168.1.10:8090`），彻底消除后续拼接 API 路由时产生 `//` 导致 HTTP 404 或重定向失败的隐患。
+
+### 23. 高性能心跳与 NVS 内存缓存（Cache）隔离原则
+1. **禁止在定时器/心跳路径高频读取 Flash**：
+   - NVS 基于底层 SPI Flash 操作，读取带有加锁开销与总线耗时；
+   - 严禁在 1Hz 定时器、UI 刷新循环或音频播放心跳中频繁调用 `nvs_get_str()`；
+2. **内存结构体常驻缓存**：
+   - 所有服务配置在类实例中维护一份内存结构体缓存（RAM Cache）；
+   - 定时轮询与网络拉取直接访问 RAM 变量；仅在收到配置变更事件时，一次性写入 NVS 并同步更新内存缓存。
+
+### 24. 异步 MCP 回调与 LVGL 跨线程安全红线（Thread Safety Boundary）
+1. **MCP 回调上下文并非 UI 线程**：
+   - 大模型下发的 MCP 工具在独立的协议通信 Task（如 WebSocket / MQTT 接收线程）中触发并执行回调；
+   - **绝对禁止在 MCP 回调函数中裸调任何 LVGL API**，否则会导致多核竞争、LVGL 对象链表破坏引发的 `Guru Meditation Error`。
+2. **统一加锁规范**：
+   - 任何涉及界面的操作（如更新设置页显示 `UpdateSettingsValues()`、更新服务器连接状态 `UpdateServerUI()`、更新播放器信息 `UpdatePlayerUI()`），必须首行通过 `DisplayLockGuard lock(this);` 获取全局互斥锁，或通过 `Application::GetInstance().Schedule()` 投递至主线程执行，确保 100% 线程安全。
+
+---
+
 *(文档将随每次修改反馈成功后持续追加更新)*
+
 
 
