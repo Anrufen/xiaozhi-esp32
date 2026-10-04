@@ -522,7 +522,50 @@
 
 ---
 
+## 十四、微雪 1.85C 板级专属 MCP 工具体系完整声明与语音触发映射
+
+### 25. 设备端 MCP 工具与服务端 Web 后台的显示机制说明
+- **为什么在官方服务端 Web 后台往往看不到这些工具？**
+  1. **小智 MCP 的动态架构**：小智采用的是 **“设备端动态注册与握手同步”** 机制。设备连上小智服务端（WebSocket / MQTT）建立会话时，底层代码通过协议握手帧，将本地 `mcp_server.AddTool(...)` 注册的工具名称、功能描述和 JSON Schema 参数结构**即时上报给云端服务**；
+  2. **直通大模型上下文**：云端收到设备上报的 Tools 后，直接注入至 LLM（如 OpenAI/Claude/通义千问等）的 `tools / functions` 数组中，供大模型即时决策；
+  3. **Web 后台的展示边界**：普通的小智 Web 管理后台大多只展示“云端平台级插件”（如云端天气 API、搜索插件），而属于特定板卡硬件能力（如屏幕翻页、板载音乐、硬件探针）的动态 Tools 属于端侧会话级注册，很多后台界面并未做动态可视化列表渲染。但这**丝毫不会影响大模型对这些工具的认知与调用**。
+
+---
+
+### 26. 微雪 1.85C 板级专属 MCP 工具全量声明清单
+
+本板型在 [esp32-s3-touch-lcd-1.85c.cc](file:///Users/anrufen/app/xiaozhi-esp32/main/boards/waveshare/esp32-s3-touch-lcd-1.85c/esp32-s3-touch-lcd-1.85c.cc) 的 `InitializeTools()` 中，共向大模型注册了 **4 大类、9 个定制 MCP 工具**：
+
+#### 1. 系统与配网管理类
+| 工具名称 | 功能描述 | 参数 (JSON Schema) | 典型触发语音指令 |
+| :--- | :--- | :--- | :--- |
+| `self.system.reconfigure_wifi` | 结束当前会话并使设备重新进入 SoftAP 配网模式 | 无 | *“重新配网”*、*“进入配网模式”*、*“换个Wi-Fi”* |
+
+#### 2. 多页面跳转与天气预报增强类
+| 工具名称 | 功能描述 | 参数 (JSON Schema) | 典型触发语音指令 |
+| :--- | :--- | :--- | :--- |
+| `self.weather.switch_page` | 语音控制 1.85 寸圆屏切换到指定功能卡片页面 | • `page` (string): 可选值包括：<br>- `'home'`（主表盘时钟与表情）<br>- `'player'`（Cyber音乐播放器）<br>- `'weather'`（明日天气HUD）<br>- `'settings'`（控制中心）<br>- `'server'`（VPS集群监控） | *“打开音乐播放器”*、*“看一下明天天气”*、*“打开服务器监控”*、*“返回主页表盘”* |
+| `self.weather.update_tomorrow` | 更新第二屏“明日天气”卡片的全量预报数据 | • `city` (string): 城市名<br>• `weather` (string): 天气状况（晴/雨/阴等）<br>• `temp` (string): 当前/预报温度<br>• `temp_range` (string): 昼夜温差区间<br>• `humidity` (string): 空气相对湿度<br>• `wind` (string): 风向风力<br>• `aqi` (string): 空气质量指数<br>• `tips` (string): 生活出行建议 | *“明天天气怎么样？”*（大模型查得天气后自动调用该工具渲染至圆屏） |
+
+#### 3. Navidrome 私有云音乐与播放控制类（受 `CONFIG_WS185C_ENABLE_NAVIDROME` 控制）
+| 工具名称 | 功能描述 | 参数 (JSON Schema) | 典型触发语音指令 |
+| :--- | :--- | :--- | :--- |
+| `self.navidrome.set_server` | 动态配置 Navidrome 音乐服务器地址与认证凭据（自动存入 NVS 命名空间 `waveshare185c`） | • `url` (string, 必填): 服务器 HTTP(S) 地址<br>• `user` (string, 可选): 用户名（缺省则保留已存账号）<br>• `password` (string, 可选): 密码（缺省则保留已存密码） | *“把音乐服务器改成 http://192.168.2.140:1011”*<br>*“配置一下 Navidrome 账号，账号是 admin 密码是 xxx”* |
+| `self.music.play_pause` | 播放或暂停当前歌曲（自动驱动跳柱声谱与黑胶自转） | 无 | *“播放音乐”*、*“暂停播放”*、*“继续播放”* |
+| `self.music.next` | 切换到下一首歌曲，拉取曲目信息并实时串流 | 无 | *“切歌”*、*“下一首”*、*“换首歌”* |
+| `self.music.prev` | 切换到上一首歌曲 | 无 | *“上一首”*、*“回上一首”* |
+| `self.music.refresh` | 重新向 Navidrome 服务器请求打乱并拉取最新曲目列表 | 无 | *“刷新曲库”*、*“重新拉取歌单”* |
+
+#### 4. Beszel VPS 集群探针监控类（受 `CONFIG_WS185C_ENABLE_BESZEL` 控制）
+| 工具名称 | 功能描述 | 参数 (JSON Schema) | 典型触发语音指令 |
+| :--- | :--- | :--- | :--- |
+| `self.beszel.set_server` | 配置 Beszel Hub 监控中心地址、认证参数及轮询/轮播间隔 | • `url` (string, 必填): Hub 地址<br>• `user` (string, 可选): 邮箱/用户名<br>• `password` (string, 可选): 密码<br>• `fetch_interval` (int, 默认 15): 数据拉取秒数<br>• `carousel_interval` (int, 默认 5): 节点轮播秒数 | *“配置 Beszel 监控服务器，地址是 http://173.231.39.37:8090”*<br>*“把服务器监控轮播时间改成 10 秒”* |
+| `self.beszel.refresh` | 立即触发重新向 Beszel Hub 拉取一次所有 VPS 的 CPU/内存/网络遥测数据 | 无 | *“刷新服务器状态”*、*“检查服务器监控”* |
+
+---
+
 *(文档将随每次修改反馈成功后持续追加更新)*
+
 
 
 
