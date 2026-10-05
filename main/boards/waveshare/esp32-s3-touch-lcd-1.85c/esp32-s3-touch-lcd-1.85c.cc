@@ -462,6 +462,8 @@ private:
                 if (display) {
                     auto* custom_disp = static_cast<CustomLcdDisplay*>(display);
                     if (custom_disp) {
+                        // 这条路径不经过 STANDBY，手动恢复唤醒词的静默倒计时
+                        custom_disp->SetCountdownEnabled(true);
                         custom_disp->HideWakeupOverlay();
                     } else {
                         display->SetStatus(Lang::Strings::STANDBY);
@@ -487,6 +489,11 @@ private:
                     display_->StopNavidromeStream();
                 }
 #endif
+                // 按键是显式意图：关掉唤醒词用的 10s 静默倒计时，否则音频通道还没
+                // 握手完 HUD 就消失了，用户会以为没收音
+                if (display_) {
+                    display_->SetCountdownEnabled(false);
+                }
                 app.GetAudioService().ResetDecoder();
                 if (display) {
                     display->SetStatus(Lang::Strings::LISTENING);

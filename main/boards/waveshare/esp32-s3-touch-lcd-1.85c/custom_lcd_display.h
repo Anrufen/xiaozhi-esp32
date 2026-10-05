@@ -112,6 +112,8 @@ public:
     void OnPlayerNextClicked();
     bool IsPlaying() const { return is_playing_; }
     void StopNavidromeStream();
+    // BOOT 键显式唤醒：关闭静默倒计时兜底，由用户自己决定何时退出
+    void SetCountdownEnabled(bool enabled) { countdown_enabled_ = enabled; }
 
     // 直链获取与 DLNA 设备控制
     std::string GetCurrentTrackDirectUrl(bool for_dlna = true);
@@ -370,6 +372,9 @@ private:
     lv_timer_t* countdown_timer_ = nullptr;  // 1s 真实倒计时定时器
     int auto_hide_seconds_left_ = 0;
     std::string current_title_base_ = "正在聆听";
+    // 倒计时只服务于「唤醒词后没说话」的静默兜底。BOOT 键是显式意图，
+    // 走按键唤醒时置 false，避免 HUD 在收音途中凭空消失。
+    bool countdown_enabled_ = true;
 
     // 配网模式界面控件
     lv_obj_t* wifi_config_overlay_ = nullptr;

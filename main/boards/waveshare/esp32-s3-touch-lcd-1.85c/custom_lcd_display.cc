@@ -936,6 +936,13 @@ void CustomLcdDisplay::SetStatus(const char* status) {
         if (wakeup_text_container_) {
             lv_obj_add_flag(wakeup_text_container_, LV_OBJ_FLAG_HIDDEN);
         }
+        // BOOT 键是显式意图，不做起始静默倒计时；否则音频通道还没握手完
+        // HUD 就消失了，用户会以为没收音到
+        if (countdown_enabled_) {
+            StartCountdown(10);
+        } else {
+            StopCountdown();
+        }
     } else if (s.find("Thinking") != std::string::npos || s.find("思考") != std::string::npos) {
         ShowWakeupOverlay();
         voice_input_detected_ = true;
@@ -1003,6 +1010,9 @@ void CustomLcdDisplay::SetStatus(const char* status) {
             lv_label_set_text(wakeup_icon_label_, MATERIAL_SYMBOLS_CHECK_CIRCLE);
         }
         voice_input_detected_ = false;
+        // 回到待机即本轮对话结束，无论上一轮是按键还是唤醒词唤醒，
+        // 都恢复唤醒词路径需要的静默倒计时
+        countdown_enabled_ = true;
         StartCountdown(10);
 
         if (led_eye_left_ && led_eye_right_) {
