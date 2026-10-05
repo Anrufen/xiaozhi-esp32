@@ -650,17 +650,22 @@ private:
 
         mcp_server.AddTool(
             "self.music.search_and_play",
-            "【点歌首选工具】当用户需要播放音乐、点歌、听指定歌手（如刘欢、陈奕迅、周杰伦等）、指定歌名、或某种心情风格的音乐时，必须优先调用本工具搜索私有曲库并起播。若未找到曲目将返回 not_found 且保留当前播放状态。",
+            "【点歌首选工具】当用户需要播放音乐、点歌、听指定歌手（如刘欢、陈奕迅、周杰伦等）、指定歌名、或某种心情风格的音乐时，必须优先调用本工具搜索私有曲库并起播。若未找到曲目将返回 not_found 且保留当前播放状态。\n"
+            "target 指定播放设备：用户明确要求在别的设备上放（如「用小爱音箱放」「投到电视上」）时传入设备名；"
+            "用户没说、或说「本机播放」时留空，默认在设备自带喇叭播放。"
+            "不确定有哪些设备可先调用 self.dlna.list_devices 查询设备名。",
             PropertyList({Property("keyword", kPropertyTypeString, std::string("")),
                           Property("artist", kPropertyTypeString, std::string("")),
                           Property("title", kPropertyTypeString, std::string("")),
-                          Property("candidates", kPropertyTypeString, std::string(""))}),
+                          Property("candidates", kPropertyTypeString, std::string("")),
+                          Property("target", kPropertyTypeString, std::string(""))}),
             [this](const PropertyList& properties) -> ReturnValue {
                 std::string keyword = properties["keyword"].value<std::string>();
                 std::string artist = properties["artist"].value<std::string>();
                 std::string title = properties["title"].value<std::string>();
                 std::string candidates = properties["candidates"].value<std::string>();
-                return display_->SearchAndPlayMusic(keyword, artist, title, candidates);
+                std::string target = properties["target"].value<std::string>();
+                return display_->SearchAndPlayMusic(keyword, artist, title, candidates, target);
             });
 
         mcp_server.AddTool(

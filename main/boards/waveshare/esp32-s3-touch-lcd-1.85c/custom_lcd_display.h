@@ -126,9 +126,19 @@ public:
     std::string GetCurrentPlaybackTargetName() const;
 
     // 智能曲库检索与场景播放（方案 B：大语言模型语义改写与定向点歌）
+    // target: 播放设备名，例如「小爱音箱」「电视」；留空或「本机」表示本机喇叭。
     std::string SearchAndPlayMusic(const std::string& keyword, const std::string& artist = "",
                                    const std::string& title = "",
-                                   const std::string& candidates = "");
+                                   const std::string& candidates = "",
+                                   const std::string& target = "");
+
+    // 解析设备名 -> DLNA 目标索引：空/「本机」等 -> -1；否则在已发现的设备里做
+    // 大小写不敏感的子串匹配。未匹配返回 false，err 带上当前可用设备名。
+    bool ResolvePlaybackTargetName(const std::string& name, int& out_index, std::string& out_name,
+                                   std::string& err) const;
+
+    // 应用播放目标（-1 本机 / >=0 DLNA 索引）。若离开旧 DLNA 设备，异步发送 Stop
+    void ApplyPlaybackTarget(int target_index);
 
     // UI 刷新
     void UpdatePlayerUI();

@@ -3708,10 +3708,102 @@ static std::string UrlEncodeQuery(const std::string& value) {
     return escaped.str();
 }
 
+bool CustomLcdDisplay::ResolvePlaybackTargetName(const std::string& name, int& out_index,
+                                                 std::string& out_name, std::string& err) const {
+    auto trim = [](const std::string& s) {
+        size_t b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) {
+            return std::string();
+        }
+        size_t e = s.find_last_not_of(" \t\r\n");
+        return s.substr(b, e - b + 1);
+    };
+    auto lower_of = [](std::string s) {
+        // 必须走 unsigned char：设备名是 UTF-8 中文，字节 >127 时 char 为负，
+        // 直接传给 tolower 属于越界未定义行为
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+        return s;
+    };
+
+    std::string key = trim(name);
+    std::string lowered = lower_of(key);
+
+    // 本机 / 本地 / 未指定：一律走板载喇叭
+    if (lowered.empty() || lowered == "local" || lowered == "speaker" || lowered == "本机" ||
+        lowered == "本机喇叭" || lowered == "本地" || lowered == "本地喇叭" ||
+        lowered == "这台设备" || lowered == "小智") {
+        out_index = -1;
+        out_name = "本机";
+        return true;
+    }
+
+    auto devices = waveshare185c::DlnaController::GetInstance().GetDevices();
+
+    // 第一轮：设备名包含用户说出的关键词（「小爱音箱」匹配「客厅的小爱音箱 Pro」）
+    int matched = -1;
+    for (size_t i = 0; i < devices.size(); ++i) {
+        if (lower_of(devices[i].name).find(lowered) != std::string::npos) {
+            matched = (int)i;
+            break;
+        }
+    }
+    // 第二轮：关键词包含设备名（用户说「客厅的小爱音箱放首歌」，设备名是「小爱音箱」）
+    // 仅在设备名不短于 2 字符时启用，避免单字符设备名匹配到任意句子
+    if (matched < 0) {
+        for (size_t i = 0; i < devices.size(); ++i) {
+            std::string dn = lower_of(devices[i].name);
+            if (dn.size() >= 2 && lowered.find(dn) != std::string::npos) {
+                matched = (int)i;
+                break;
+            }
+        }
+    }
+
+    if (matched < 0) {
+        std::string avail;
+        for (const auto& d : devices) {
+            if (!avail.empty()) {
+                avail += "、";
+            }
+            avail += d.name;
+        }
+        err = "未找到名为「" + key + "」的播放设备";
+        err += avail.empty() ? "，且局域网内暂未发现任何 DLNA 设备" : "，当前可用设备：" + avail;
+        return false;
+    }
+
+    out_index = matched;
+    out_name = devices[matched].name;
+    return true;
+}
+
+void CustomLcdDisplay::ApplyPlaybackTarget(int target_index) {
+    auto& dlna = waveshare185c::DlnaController::GetInstance();
+    int old_target = dlna.GetTargetIndex();
+    if (old_target == target_index) {
+        return;
+    }
+    dlna.SetTargetIndex(target_index);
+    ESP_LOGI(TAG, "Playback target changed: %d -> %d", old_target, target_index);
+
+    // 离开旧 DLNA 设备时同步发送 Stop，避免它自己继续播下去
+    if (old_target >= 0) {
+        xTaskCreate(
+            [](void* param) {
+                int dev = (int)(intptr_t)param;
+                waveshare185c::DlnaController::GetInstance().Stop(dev);
+                vTaskDelete(NULL);
+            },
+            "dlna_stop_old", 3072, (void*)(intptr_t)old_target, 3, NULL);
+    }
+}
+
 std::string CustomLcdDisplay::SearchAndPlayMusic(const std::string& keyword,
                                                 const std::string& artist,
                                                 const std::string& title,
-                                                const std::string& candidates) {
+                                                const std::string& candidates,
+                                                const std::string& target) {
     if (navidrome_server_.empty() || navidrome_user_.empty() || navidrome_pass_.empty()) {
         return "{\"status\": \"error\", \"message\": \"Navidrome 服务未配置，无法在曲库中检索\"}";
     }
@@ -3721,8 +3813,26 @@ std::string CustomLcdDisplay::SearchAndPlayMusic(const std::string& keyword,
         return "{\"status\": \"error\", \"message\": \"网络不可用，无法连接 Navidrome 服务器\"}";
     }
 
-    ESP_LOGI(TAG, "SearchAndPlayMusic invoked: artist=[%s], title=[%s], keyword=[%s], candidates=[%s]",
-             artist.c_str(), title.c_str(), keyword.c_str(), candidates.c_str());
+    // 先解析播放设备再检索：设备名不存在就直接失败，不去动当前播放列表
+    int target_index = -1;
+    std::string target_name;
+    std::string target_err;
+    if (!ResolvePlaybackTargetName(target, target_index, target_name, target_err)) {
+        ESP_LOGW(TAG, "SearchAndPlayMusic: %s", target_err.c_str());
+        cJSON* err_json = cJSON_CreateObject();
+        cJSON_AddStringToObject(err_json, "status", "device_not_found");
+        cJSON_AddStringToObject(err_json, "message", target_err.c_str());
+        char* err_printed = cJSON_PrintUnformatted(err_json);
+        std::string err_str = err_printed ? err_printed : "{\"status\": \"device_not_found\"}";
+        cJSON_free(err_printed);
+        cJSON_Delete(err_json);
+        return err_str;
+    }
+
+    ESP_LOGI(TAG,
+             "SearchAndPlayMusic invoked: artist=[%s], title=[%s], keyword=[%s], candidates=[%s], "
+             "target=[%s]",
+             artist.c_str(), title.c_str(), keyword.c_str(), candidates.c_str(), target_name.c_str());
 
     bool is_random_mode = false;
     std::string lower_kw = keyword;
@@ -3941,6 +4051,7 @@ std::string CustomLcdDisplay::SearchAndPlayMusic(const std::string& keyword,
     cJSON_AddNumberToObject(res_json, "matched_count", (int)matched_tracks.size());
     cJSON_AddStringToObject(res_json, "playing_title", matched_tracks[0].title.c_str());
     cJSON_AddStringToObject(res_json, "playing_artist", matched_tracks[0].artist.c_str());
+    cJSON_AddStringToObject(res_json, "playback_device", target_name.c_str());
     cJSON_AddStringToObject(res_json, "instruction", "Playback started. Remain completely silent and do NOT read any text.");
     cJSON* song_names = cJSON_AddArrayToObject(res_json, "songs");
     for (const auto& t : matched_tracks) {
@@ -3953,7 +4064,8 @@ std::string CustomLcdDisplay::SearchAndPlayMusic(const std::string& keyword,
     cJSON_Delete(res_json);
 
     // 调度到主线程：更新播放列表并立即起播、切至播放屏，自动退出对话模式
-    Application::GetInstance().Schedule([this, new_list = std::move(matched_tracks)]() mutable {
+    Application::GetInstance().Schedule([this, new_list = std::move(matched_tracks),
+                                         target_index]() mutable {
         DisplayLockGuard lock(this);
         // 保留原日常随机列表副本（如果之前为空）
         if (default_playlist_.empty() && !playlist_.empty()) {
@@ -3974,7 +4086,10 @@ std::string CustomLcdDisplay::SearchAndPlayMusic(const std::string& keyword,
         app.GetAudioService().ResetDecoder();
         app.SetDeviceState(kDeviceStateIdle);
 
-        // 3. 立即起播音乐
+        // 3. 先落到本次点歌指定的播放设备（StartNavidromeStream 据此决定本地流还是 DLNA 投送）
+        ApplyPlaybackTarget(target_index);
+
+        // 4. 立即起播音乐
         StartNavidromeStream(0);
     });
 
