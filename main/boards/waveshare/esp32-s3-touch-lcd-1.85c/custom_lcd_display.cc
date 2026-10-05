@@ -798,29 +798,34 @@ void CustomLcdDisplay::UpdateWakeupVuAnimation() {
         }
     }
 
-    // 如果当前切到了文本播报模式（vu_container 隐藏），暂停频谱计算
-    if (wakeup_vu_container_ && !lv_obj_has_flag(wakeup_vu_container_, LV_OBJ_FLAG_HIDDEN)) {
-        float base = sinf(phase) * 0.4f + 0.6f;
-        for (int i = 0; i < 10; ++i) {
-            if (!wakeup_vu_bars_[i])
-                continue;
-            float noise = sinf(phase * 2.0f + i * 0.8f) * 0.5f + 0.5f;
-            int h = (int)(noise * base * 16.0f);
-            if (h < 4)
-                h = 4;
-            if (h > 20)
-                h = 20;
+    // 如果当前切到了文本播报模式（vu_container 隐藏），暂停频谱计算。
+    // 注意这里的提前 return 是有意为之，且不能去掉：VU 容器只在 LISTENING 分支被显示，
+    // 而通知播报走 notifying -> idle，全程 VU 都是隐藏的。若让下面的 VAD 检查在 VU 隐藏
+    // 时也执行，通知自己的 TTS 尾音就会把刚启动的倒计时取消掉，屏幕卡在「回答完毕」。
+    if (!wakeup_vu_container_ || lv_obj_has_flag(wakeup_vu_container_, LV_OBJ_FLAG_HIDDEN)) {
+        return;
+    }
 
-            lv_obj_set_height(wakeup_vu_bars_[i], h);
-            lv_obj_set_y(wakeup_vu_bars_[i], 32 - h);
+    float base = sinf(phase) * 0.4f + 0.6f;
+    for (int i = 0; i < 10; ++i) {
+        if (!wakeup_vu_bars_[i])
+            continue;
+        float noise = sinf(phase * 2.0f + i * 0.8f) * 0.5f + 0.5f;
+        int h = (int)(noise * base * 16.0f);
+        if (h < 4)
+            h = 4;
+        if (h > 20)
+            h = 20;
 
-            if (h > 14) {
-                lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x00D2FF), 0);
-            } else if (h > 8) {
-                lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x4EDEA3), 0);
-            } else {
-                lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x31353E), 0);
-            }
+        lv_obj_set_height(wakeup_vu_bars_[i], h);
+        lv_obj_set_y(wakeup_vu_bars_[i], 32 - h);
+
+        if (h > 14) {
+            lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x00D2FF), 0);
+        } else if (h > 8) {
+            lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x4EDEA3), 0);
+        } else {
+            lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x31353E), 0);
         }
     }
 
@@ -1018,9 +1023,11 @@ void CustomLcdDisplay::SetStatus(const char* status) {
         // 回到待机即本轮对话结束，无论上一轮是按键还是唤醒词唤醒，
         // 都恢复唤醒词路径需要的静默倒计时
         countdown_enabled_ = true;
-        // 倒计时的实际启动统一交给 ClearChatMessages()（application.cc 的 idle
-        // 分支紧接着就会调它）。这里不再重复 StartCountdown(10)，否则倒计时会被
-        // 重置两次，改动时容易只改到一处。
+        // 倒计时的启动必须放在这里而不是 ClearChatMessages()：进 idle 的路径不止
+        // 一条（handle_exit_intent 走 ClearChatMessages，通知播报走 StopNotification），
+        // 只有这个分支是所有路径的公共必经点。ClearChatMessages() 里那次调用只是
+        // 在聊天页场景下更早地起表，重复启动无害（lv_timer_reset 是幂等的）。
+        StartCountdown(10);
 
         if (led_eye_left_ && led_eye_right_) {
             lv_obj_set_style_bg_color(led_eye_left_, lv_color_hex(0x859399), 0);
