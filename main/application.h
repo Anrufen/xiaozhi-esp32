@@ -118,6 +118,8 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+    void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
+    void StopNotification();
     
     /**
      * Reset protocol resources (thread-safe)
@@ -169,8 +171,6 @@ private:
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void StartListeningAudio();
     void ConfigureWakeWordForListening();
-    void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
-    void StopNotification();
     void HandleNotificationFinished(uint32_t playback_id, bool success);
 
     // Activation task (runs in background)

@@ -22,6 +22,7 @@
 #include <esp_heap_caps.h>
 #include "esp_io_expander_tca9554.h"
 #include "i2c_device.h"
+#include "notification_service.h"
 
 #define TAG "waveshare_lcd_1_85c"
 
@@ -775,6 +776,49 @@ private:
                                return true;
                            });
 #endif
+
+        mcp_server.AddTool(
+            "self.notify.status",
+            "获取小智主动通知通道（MQTT订阅与Edge TTS）的当前运行状态与队列信息",
+            PropertyList(),
+            [](const PropertyList& properties) -> ReturnValue {
+                return waveshare185c::NotificationService::GetInstance().GetStatusJson();
+            });
+
+        mcp_server.AddTool(
+            "self.notify.test",
+            "测试主动播报一条通知（模拟 n8n/外部自动化消息推送）",
+            PropertyList({Property("text", kPropertyTypeString, std::string("这是一条测试通知，自动化任务已完成。"))}),
+            [](const PropertyList& properties) -> ReturnValue {
+                std::string text = properties["text"].value<std::string>();
+                bool ok = waveshare185c::NotificationService::GetInstance().TestNotify(text);
+                return ok ? "Notification enqueued for playback" : "Failed to enqueue notification";
+            });
+
+        mcp_server.AddTool(
+            "self.notify.set_config",
+            "动态配置 MQTT 与 Edge TTS 参数并保存到 NVS（为空项保持原值）",
+            PropertyList({Property("host", kPropertyTypeString, std::string("")),
+                          Property("port", kPropertyTypeInteger, 0),
+                          Property("user", kPropertyTypeString, std::string("")),
+                          Property("password", kPropertyTypeString, std::string("")),
+                          Property("topic", kPropertyTypeString, std::string("")),
+                          Property("tts_url", kPropertyTypeString, std::string("")),
+                          Property("tts_token", kPropertyTypeString, std::string("")),
+                          Property("tts_voice", kPropertyTypeString, std::string(""))}),
+            [](const PropertyList& properties) -> ReturnValue {
+                std::string host = properties["host"].value<std::string>();
+                int port = properties["port"].value<int>();
+                std::string user = properties["user"].value<std::string>();
+                std::string pass = properties["password"].value<std::string>();
+                std::string topic = properties["topic"].value<std::string>();
+                std::string tts_url = properties["tts_url"].value<std::string>();
+                std::string tts_token = properties["tts_token"].value<std::string>();
+                std::string tts_voice = properties["tts_voice"].value<std::string>();
+                bool ok = waveshare185c::NotificationService::GetInstance().SetConfig(
+                    host, port, user, pass, topic, tts_url, tts_token, tts_voice);
+                return ok ? "Notification configuration updated and applied" : "Failed to update configuration";
+            });
     }
 
 public:
@@ -786,6 +830,7 @@ public:
         InitializeTouch();
         InitializeButtons();
         InitializeTools();
+        waveshare185c::NotificationService::GetInstance().Initialize();
         GetBacklight()->RestoreBrightness();
         GetAudioCodec()->SetOutputVolume(30);
 
@@ -866,6 +911,19 @@ public:
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;
+    }
+
+    virtual void SetNetworkEventCallback(NetworkEventCallback callback) override {
+        WifiBoard::SetNetworkEventCallback([this, cb = std::move(callback)](NetworkEvent event, const std::string& data) {
+            if (event == NetworkEvent::Connected) {
+                waveshare185c::NotificationService::GetInstance().Start();
+            } else if (event == NetworkEvent::Disconnected) {
+                waveshare185c::NotificationService::GetInstance().Stop();
+            }
+            if (cb) {
+                cb(event, data);
+            }
+        });
     }
 };
 
