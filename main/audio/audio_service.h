@@ -159,6 +159,8 @@ private:
     std::mutex input_resampler_mutex_;
     esp_ae_rate_cvt_handle_t input_resampler_ = nullptr;
     esp_ae_rate_cvt_handle_t output_resampler_ = nullptr;
+    // output_resampler_ 的源采样率，0 表示尚未创建或已失效
+    int output_resampler_rate_ = 0;
 
     // Encoder/Decoder state
     int encoder_sample_rate_ = 16000;

@@ -42,6 +42,7 @@ AudioService::~AudioService() {
     }
     if (output_resampler_ != nullptr) {
         esp_ae_rate_cvt_close(output_resampler_);
+        output_resampler_rate_ = 0;
     }
 }
 
@@ -551,17 +552,25 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
 
     auto codec = Board::GetInstance().GetAudioCodec();
     if (decoder_sample_rate_ != codec->output_sample_rate()) {
-        ESP_LOGI(TAG, "Resampling audio from %d to %d", decoder_sample_rate_,
-                 codec->output_sample_rate());
-        if (output_resampler_ != nullptr) {
-            esp_ae_rate_cvt_close(output_resampler_);
-            output_resampler_ = nullptr;
-        }
-        esp_ae_rate_cvt_cfg_t output_resampler_cfg =
-            RATE_CVT_CFG(decoder_sample_rate_, codec->output_sample_rate(), ESP_AUDIO_MONO);
-        auto resampler_ret = esp_ae_rate_cvt_open(&output_resampler_cfg, &output_resampler_);
-        if (output_resampler_ == nullptr) {
-            ESP_LOGE(TAG, "Failed to create output resampler, error code: %d", resampler_ret);
+        // Resampler 是重采样状态机，重置它就会毁掉正在进行的相位，所以只在
+        // 采样率真正变化时重建。服务端每次下发 opus header 都会走到这里，
+        // 无条件重建会在内部 SRAM 上累积几十 KB 无法释放的分配。
+        if (output_resampler_ == nullptr || output_resampler_rate_ != decoder_sample_rate_) {
+            ESP_LOGI(TAG, "Resampling audio from %d to %d", decoder_sample_rate_,
+                     codec->output_sample_rate());
+            if (output_resampler_ != nullptr) {
+                esp_ae_rate_cvt_close(output_resampler_);
+                output_resampler_ = nullptr;
+            }
+            esp_ae_rate_cvt_cfg_t output_resampler_cfg =
+                RATE_CVT_CFG(decoder_sample_rate_, codec->output_sample_rate(), ESP_AUDIO_MONO);
+            auto resampler_ret = esp_ae_rate_cvt_open(&output_resampler_cfg, &output_resampler_);
+            if (output_resampler_ == nullptr) {
+                output_resampler_rate_ = 0;
+                ESP_LOGE(TAG, "Failed to create output resampler, error code: %d", resampler_ret);
+            } else {
+                output_resampler_rate_ = decoder_sample_rate_;
+            }
         }
     }
 }
