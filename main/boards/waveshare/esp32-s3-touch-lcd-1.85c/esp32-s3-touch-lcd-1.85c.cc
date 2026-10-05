@@ -805,18 +805,20 @@ private:
                           Property("topic", kPropertyTypeString, std::string("")),
                           Property("tts_url", kPropertyTypeString, std::string("")),
                           Property("tts_token", kPropertyTypeString, std::string("")),
-                          Property("tts_voice", kPropertyTypeString, std::string(""))}),
+                          Property("tts_voice", kPropertyTypeString, std::string("")),
+                          Property("tts_format", kPropertyTypeString, std::string(""))}),
             [](const PropertyList& properties) -> ReturnValue {
-                std::string host = properties["host"].value<std::string>();
-                int port = properties["port"].value<int>();
-                std::string user = properties["user"].value<std::string>();
-                std::string pass = properties["password"].value<std::string>();
-                std::string topic = properties["topic"].value<std::string>();
-                std::string tts_url = properties["tts_url"].value<std::string>();
-                std::string tts_token = properties["tts_token"].value<std::string>();
-                std::string tts_voice = properties["tts_voice"].value<std::string>();
-                bool ok = waveshare185c::NotificationService::GetInstance().SetConfig(
-                    host, port, user, pass, topic, tts_url, tts_token, tts_voice);
+                waveshare185c::NotifyConfig cfg;
+                cfg.mqtt_host = properties["host"].value<std::string>();
+                cfg.mqtt_port = properties["port"].value<int>();
+                cfg.mqtt_user = properties["user"].value<std::string>();
+                cfg.mqtt_pass = properties["password"].value<std::string>();
+                cfg.mqtt_topic = properties["topic"].value<std::string>();
+                cfg.tts_base_url = properties["tts_url"].value<std::string>();
+                cfg.tts_token = properties["tts_token"].value<std::string>();
+                cfg.tts_voice = properties["tts_voice"].value<std::string>();
+                cfg.tts_format = properties["tts_format"].value<std::string>();
+                bool ok = waveshare185c::NotificationService::GetInstance().SetConfig(cfg);
                 return ok ? "Notification configuration updated and applied" : "Failed to update configuration";
             });
     }

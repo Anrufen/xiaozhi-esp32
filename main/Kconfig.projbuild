@@ -928,6 +928,66 @@ menu "Waveshare 1.85C Extended Services"
         help
             Interval in seconds for cycling through nodes on the HUD.
 
+    config WS185C_NOTIFY_MQTT_HOST
+        string "Notification MQTT Broker Host"
+        default ""
+        help
+            Hostname or IP of the MQTT broker used for proactive notifications
+            (e.g. 193.177.220.138). Leave empty to disable the notification service.
+            Can be overridden at runtime via the self.notify.set_config MCP tool.
+
+    config WS185C_NOTIFY_MQTT_PORT
+        int "Notification MQTT Broker Port"
+        default 8883
+        range 1 65535
+        help
+            Broker port. Use 8883 for TLS, any other port for plaintext TCP.
+
+    config WS185C_NOTIFY_MQTT_USER
+        string "Notification MQTT Username"
+        default ""
+        help
+            MQTT username for the notification topic subscription.
+
+    config WS185C_NOTIFY_MQTT_PASS
+        string "Notification MQTT Password"
+        default ""
+        help
+            MQTT password for the notification topic subscription.
+
+    config WS185C_NOTIFY_MQTT_TOPIC
+        string "Notification MQTT Topic"
+        default ""
+        help
+            Topic the device subscribes to for proactive notifications
+            (e.g. xiaozhi/notify/desk).
+
+    config WS185C_NOTIFY_TTS_URL
+        string "Notification TTS Endpoint"
+        default ""
+        help
+            Full base URL of the TTS synthesis endpoint, without query string
+            (e.g. http://1.2.3.4:8000/tts). Must start with http:// or https://.
+
+    config WS185C_NOTIFY_TTS_TOKEN
+        string "Notification TTS Access Token"
+        default ""
+        help
+            Access token appended to TTS requests as the "token" query parameter.
+
+    config WS185C_NOTIFY_TTS_VOICE
+        string "Notification TTS Voice"
+        default "zh-CN-XiaoxiaoNeural"
+        help
+            TTS voice name passed through to the endpoint as the "voice" query
+            parameter (e.g. zh-CN-XiaoxiaoNeural).
+
+    config WS185C_NOTIFY_TTS_FORMAT
+        string "Notification TTS Audio Format"
+        default "opus"
+        help
+            Audio format requested from the TTS endpoint (mp3, opus or wav).
+
 endmenu
 
 

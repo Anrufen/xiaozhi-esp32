@@ -88,6 +88,12 @@ class ServiceConfigTest(unittest.TestCase):
                        "http://hub.com/stream?id=123&u=admin&p=***&v=1");
                 assert(ServiceConfig::RedactUrl("http://hub.com/stream?p=topsecret") ==
                        "http://hub.com/stream?p=***");
+                // TTS 端点的访问令牌同样不得出现在日志里
+                assert(ServiceConfig::RedactUrl(
+                           "http://tts.vps:8000/tts?text=hi&token=secret123&voice=zh-CN") ==
+                       "http://tts.vps:8000/tts?text=hi&token=***&voice=zh-CN");
+                assert(ServiceConfig::RedactUrl("http://tts.vps:8000/tts?token=onlytoken") ==
+                       "http://tts.vps:8000/tts?token=***");
             }
 
             void TestNavidromeConfigPrecedenceAndIncremental() {
@@ -104,7 +110,7 @@ class ServiceConfigTest(unittest.TestCase):
                 // 设置 Kconfig 默认值，带斜杠的默认值应被自动规范化
                 NavidromeConfig defaults{"http://default.local:4533///", "def_user", "def_pass"};
                 BeszelConfig bsz_defaults;
-                cfg.SetKconfigDefaults(defaults, bsz_defaults);
+                cfg.SetKconfigDefaults(defaults, bsz_defaults, NotifyConfig{});
 
                 // NVS 为空时回退到默认值，斜杠已被清除
                 navi = cfg.GetNavidromeConfig();
@@ -148,7 +154,7 @@ class ServiceConfigTest(unittest.TestCase):
                 // Kconfig 默认带斜杠自动去除
                 BeszelConfig bsz_defaults{"http://hub.default:8090/", "admin@def", "pass123", 20, 8};
                 NavidromeConfig navi_defaults;
-                cfg.SetKconfigDefaults(navi_defaults, bsz_defaults);
+                cfg.SetKconfigDefaults(navi_defaults, bsz_defaults, NotifyConfig{});
 
                 // 初始回退默认值
                 BeszelConfig bsz = cfg.GetBeszelConfig();
@@ -210,12 +216,88 @@ class ServiceConfigTest(unittest.TestCase):
                 assert(bsz.IsConfigured());
             }
 
+            void TestNotifyConfigPrecedenceAndIncremental() {
+                auto store = std::make_shared<MemoryKeyValueStore>();
+                ServiceConfig cfg(store);
+
+                // Kconfig 默认值：TTS URL 末尾斜杠应被自动去除
+                NotifyConfig notify_defaults;
+                notify_defaults.mqtt_host = "broker.default";
+                notify_defaults.mqtt_port = 8883;
+                notify_defaults.mqtt_user = "def_user";
+                notify_defaults.mqtt_pass = "def_pass";
+                notify_defaults.mqtt_topic = "def/topic";
+                notify_defaults.tts_base_url = "http://tts.default:8000/tts/";
+                notify_defaults.tts_token = "def_token";
+                notify_defaults.tts_voice = "def_voice";
+                cfg.SetKconfigDefaults(NavidromeConfig{}, BeszelConfig{}, notify_defaults);
+
+                NotifyConfig ntf = cfg.GetNotifyConfig();
+                assert(ntf.mqtt_host == "broker.default");
+                assert(ntf.mqtt_port == 8883);
+                assert(ntf.tts_base_url == "http://tts.default:8000/tts");
+                assert(ntf.tts_token == "def_token");
+                assert(ntf.IsConfigured());
+                assert(ntf.UsesTls());
+
+                std::string err;
+                // 拒绝无协议头的 TTS URL
+                assert(!cfg.SetNotifyConfig("", 0, "", "", "", "tts.invalid/x", "", "", "", err));
+                // 拒绝越界端口
+                assert(!cfg.SetNotifyConfig("", 99999, "", "", "", "", "", "", "", err));
+
+                // 空参数表示保留原值：已有默认值时不应被误判为空
+                assert(cfg.SetNotifyConfig("", 0, "", "", "", "", "", "", "", err));
+
+                // 当前值与入参皆为空时无处可继承，必须拒绝而非落盘一份不可用配置
+                ServiceConfig blank(std::make_shared<MemoryKeyValueStore>());
+                blank.SetKconfigDefaults(NavidromeConfig{}, BeszelConfig{}, NotifyConfig{});
+                std::string blank_err;
+                assert(!blank.SetNotifyConfig("", 0, "", "", "", "", "", "", "", blank_err));
+                // 纯空白 host 应被识别为空并拒绝
+                assert(!blank.SetNotifyConfig("  ", 0, "", "", "", "", "", "", "", blank_err));
+                assert(!blank.GetNotifyConfig().IsConfigured());
+
+                // 写入合法 NVS 配置
+                assert(cfg.SetNotifyConfig("broker.vps", 1883, "u", "p", "xiaozhi/notify/desk",
+                                           "http://tts.vps:8000/tts", "tok", "zh-CN-XiaoxiaoNeural",
+                                           "mp3", err));
+                ntf = cfg.GetNotifyConfig();
+                assert(ntf.mqtt_host == "broker.vps");
+                assert(ntf.mqtt_port == 1883);
+                assert(ntf.mqtt_user == "u");
+                assert(ntf.mqtt_pass == "p");
+                assert(ntf.mqtt_topic == "xiaozhi/notify/desk");
+                assert(ntf.tts_base_url == "http://tts.vps:8000/tts");
+                assert(ntf.tts_token == "tok");
+                assert(ntf.tts_format == "mp3");
+                assert(!ntf.UsesTls());
+
+                // 增量更新：仅改 host/端口，其余传空保留原值
+                assert(cfg.SetNotifyConfig("broker.new", 8883, "", "", "", "", "", "", "", err));
+                ntf = cfg.GetNotifyConfig();
+                assert(ntf.mqtt_host == "broker.new");
+                assert(ntf.mqtt_port == 8883);
+                assert(ntf.mqtt_user == "u");
+                assert(ntf.mqtt_pass == "p");
+                assert(ntf.mqtt_topic == "xiaozhi/notify/desk");
+                assert(ntf.tts_token == "tok");
+                assert(ntf.tts_format == "mp3");
+                assert(ntf.UsesTls());
+
+                // NVS 中的端口被写坏时回退到 Kconfig 默认
+                store->SetInt(ServiceConfig::kKeyNotifyMqttPort, -1);
+                ntf = cfg.GetNotifyConfig();
+                assert(ntf.mqtt_port == 8883);
+            }
+
             int main() {
                 TestUrlNormalization();
                 TestUrlRedaction();
                 TestNavidromeConfigPrecedenceAndIncremental();
                 TestBeszelConfigAndIntervalsAndIncremental();
                 TestIsConfiguredMatrix();
+                TestNotifyConfigPrecedenceAndIncremental();
                 std::cout << "All service config tests passed!" << std::endl;
                 return 0;
             }

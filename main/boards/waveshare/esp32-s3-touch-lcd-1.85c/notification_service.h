@@ -1,12 +1,15 @@
 #ifndef NOTIFICATION_SERVICE_H_
 #define NOTIFICATION_SERVICE_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 #include <mutex>
 #include <esp_timer.h>
 #include <mqtt_client.h>
 #include <cJSON.h>
+
+#include "service_config.h"
 
 namespace waveshare185c {
 
@@ -34,10 +37,7 @@ public:
     // MCP 工具查询与配置接口
     std::string GetStatusJson();
     bool TestNotify(const std::string& text);
-    bool SetConfig(const std::string& host, int port, const std::string& user,
-                   const std::string& pass, const std::string& topic,
-                   const std::string& tts_url, const std::string& tts_token,
-                   const std::string& tts_voice);
+    bool SetConfig(const NotifyConfig& config);
 
     bool IsConnected() const { return is_connected_; }
 
@@ -46,7 +46,6 @@ private:
     ~NotificationService();
 
     void LoadConfig();
-    void SaveConfig();
     void ProcessQueue();
     std::string BuildTtsUrl(const std::string& text);
     static std::string UrlEncode(const std::string& value);
@@ -57,23 +56,14 @@ private:
     void HandleMqttData(const char* topic, int topic_len, const char* data, int data_len);
 
     mutable std::recursive_mutex mutex_;
+    std::shared_ptr<ServiceConfig> service_config_;
     esp_mqtt_client_handle_t mqtt_client_ = nullptr;
     esp_timer_handle_t check_timer_ = nullptr;
 
-    bool enabled_ = true;
     bool is_connected_ = false;
     bool is_started_ = false;
 
-    // 配置参数
-    std::string mqtt_host_ = "193.177.220.138";
-    int mqtt_port_ = 8883;
-    std::string mqtt_user_ = "device_xiaozhi";
-    std::string mqtt_pass_ = "gr_aJcPGhfIeuqxqMXsZuHNCycnLsk2c";
-    std::string mqtt_topic_ = "xiaozhi/notify/desk";
-
-    std::string tts_base_url_ = "http://193.177.220.138:8000/tts";
-    std::string tts_token_ = "nWfzWHlvt-4tlfRVS3jot4B8e0s9kJEl";
-    std::string tts_voice_ = "zh-CN-XiaoxiaoNeural";
+    NotifyConfig config_;
 
     // 通知排队队列（最大 5 条）
     static constexpr size_t kMaxQueueSize = 5;

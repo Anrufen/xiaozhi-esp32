@@ -106,6 +106,7 @@ ServiceConfig::ServiceConfig(std::shared_ptr<KeyValueStore> store) : store_(std:
     kconfig_navi_defaults_ = NavidromeConfig{"", "", ""};
     kconfig_bsz_defaults_ =
         BeszelConfig{"", "", "", kDefaultBszFetchInterval, kDefaultBszRotateInterval};
+    kconfig_notify_defaults_ = NotifyConfig{};
 }
 
 bool ServiceConfig::NormalizeAndValidateUrl(const std::string& input, std::string& output,
@@ -144,10 +145,15 @@ bool ServiceConfig::NormalizeAndValidateUrl(const std::string& input, std::strin
 
 std::string ServiceConfig::RedactUrl(const std::string& url) {
     std::string res = url;
-    for (const char* prefix : {"&p=", "?p="}) {
-        size_t pos = res.find(prefix);
-        if (pos != std::string::npos) {
-            size_t start = pos + 3;
+    for (const char* param : {"p", "token", "password"}) {
+        std::string amp = "&" + std::string(param) + "=";
+        std::string q = "?" + std::string(param) + "=";
+        for (const std::string& marker : {amp, q}) {
+            size_t pos = res.find(marker);
+            if (pos == std::string::npos) {
+                continue;
+            }
+            size_t start = pos + marker.size();
             size_t end = res.find('&', start);
             if (end == std::string::npos) {
                 res.replace(start, res.size() - start, "***");
@@ -199,9 +205,11 @@ std::string ServiceConfig::GenerateNavidromeDirectUrl(const std::string& base_ur
     return oss.str();
 }
 
-void ServiceConfig::SetKconfigDefaults(const NavidromeConfig& navi, const BeszelConfig& bsz) {
+void ServiceConfig::SetKconfigDefaults(const NavidromeConfig& navi, const BeszelConfig& bsz,
+                                       const NotifyConfig& notify) {
     kconfig_navi_defaults_ = navi;
     kconfig_bsz_defaults_ = bsz;
+    kconfig_notify_defaults_ = notify;
 
     std::string norm_url;
     if (NormalizeAndValidateUrl(navi.url, norm_url, true)) {
@@ -209,6 +217,9 @@ void ServiceConfig::SetKconfigDefaults(const NavidromeConfig& navi, const Beszel
     }
     if (NormalizeAndValidateUrl(bsz.url, norm_url, true)) {
         kconfig_bsz_defaults_.url = norm_url;
+    }
+    if (NormalizeAndValidateUrl(notify.tts_base_url, norm_url, true)) {
+        kconfig_notify_defaults_.tts_base_url = norm_url;
     }
 
     if (kconfig_bsz_defaults_.fetch_interval_s < kMinInterval ||
@@ -218,6 +229,12 @@ void ServiceConfig::SetKconfigDefaults(const NavidromeConfig& navi, const Beszel
     if (kconfig_bsz_defaults_.rotate_interval_s < kMinInterval ||
         kconfig_bsz_defaults_.rotate_interval_s > kMaxInterval) {
         kconfig_bsz_defaults_.rotate_interval_s = kDefaultBszRotateInterval;
+    }
+    if (kconfig_notify_defaults_.mqtt_port <= 0 || kconfig_notify_defaults_.mqtt_port > 65535) {
+        kconfig_notify_defaults_.mqtt_port = kDefaultNotifyMqttPort;
+    }
+    if (kconfig_notify_defaults_.tts_format.empty()) {
+        kconfig_notify_defaults_.tts_format = kDefaultNotifyTtsFormat;
     }
 }
 
@@ -327,6 +344,90 @@ bool ServiceConfig::SetBeszelConfig(const std::string& url, const std::string& u
     return true;
 }
 
+NotifyConfig ServiceConfig::GetNotifyConfig() const {
+    NotifyConfig cfg;
+    if (!store_) {
+        return kconfig_notify_defaults_;
+    }
+
+    auto pick = [this](const char* key, const std::string& fallback) {
+        std::string v = store_->GetString(key, "");
+        return v.empty() ? fallback : v;
+    };
+
+    cfg.mqtt_host = pick(kKeyNotifyMqttHost, kconfig_notify_defaults_.mqtt_host);
+    cfg.mqtt_user = pick(kKeyNotifyMqttUser, kconfig_notify_defaults_.mqtt_user);
+    cfg.mqtt_pass = pick(kKeyNotifyMqttPass, kconfig_notify_defaults_.mqtt_pass);
+    cfg.mqtt_topic = pick(kKeyNotifyMqttTopic, kconfig_notify_defaults_.mqtt_topic);
+    cfg.tts_base_url = pick(kKeyNotifyTtsUrl, kconfig_notify_defaults_.tts_base_url);
+    cfg.tts_token = pick(kKeyNotifyTtsToken, kconfig_notify_defaults_.tts_token);
+    cfg.tts_voice = pick(kKeyNotifyTtsVoice, kconfig_notify_defaults_.tts_voice);
+    cfg.tts_format = pick(kKeyNotifyTtsFormat, kconfig_notify_defaults_.tts_format);
+
+    int32_t nvs_port = store_->GetInt(kKeyNotifyMqttPort, 0);
+    cfg.mqtt_port = (nvs_port > 0 && nvs_port <= 65535) ? nvs_port
+                                                       : kconfig_notify_defaults_.mqtt_port;
+    if (cfg.mqtt_port <= 0) {
+        cfg.mqtt_port = kDefaultNotifyMqttPort;
+    }
+    return cfg;
+}
+
+bool ServiceConfig::SetNotifyConfig(const std::string& mqtt_host, int32_t mqtt_port,
+                                    const std::string& mqtt_user, const std::string& mqtt_pass,
+                                    const std::string& mqtt_topic, const std::string& tts_base_url,
+                                    const std::string& tts_token, const std::string& tts_voice,
+                                    const std::string& tts_format, std::string& err_msg) {
+    if (!store_) {
+        err_msg = "Internal error: storage unavailable";
+        return false;
+    }
+
+    NotifyConfig cur = GetNotifyConfig();
+
+    std::string final_host = mqtt_host.empty() ? cur.mqtt_host : TrimWhitespace(mqtt_host);
+    if (final_host.empty()) {
+        err_msg = "Invalid MQTT host: must not be empty";
+        return false;
+    }
+
+    int32_t final_port = (mqtt_port > 0) ? mqtt_port : cur.mqtt_port;
+    if (final_port <= 0 || final_port > 65535) {
+        err_msg = "Invalid MQTT port: must be between 1 and 65535";
+        return false;
+    }
+
+    std::string final_topic = mqtt_topic.empty() ? cur.mqtt_topic : TrimWhitespace(mqtt_topic);
+    if (final_topic.empty()) {
+        err_msg = "Invalid MQTT topic: must not be empty";
+        return false;
+    }
+
+    std::string norm_url;
+    if (!NormalizeAndValidateUrl(tts_base_url.empty() ? cur.tts_base_url : tts_base_url,
+                                 norm_url, /*allow_empty=*/false)) {
+        err_msg = "Invalid TTS URL: must start with http:// or https:// and include a host";
+        return false;
+    }
+
+    std::string final_format = tts_format.empty() ? cur.tts_format : TrimWhitespace(tts_format);
+    if (final_format.empty()) {
+        err_msg = "Invalid TTS format: must not be empty";
+        return false;
+    }
+
+    store_->SetString(kKeyNotifyMqttHost, final_host);
+    store_->SetInt(kKeyNotifyMqttPort, final_port);
+    store_->SetString(kKeyNotifyMqttUser, mqtt_user.empty() ? cur.mqtt_user : mqtt_user);
+    store_->SetString(kKeyNotifyMqttPass, mqtt_pass.empty() ? cur.mqtt_pass : mqtt_pass);
+    store_->SetString(kKeyNotifyMqttTopic, final_topic);
+    store_->SetString(kKeyNotifyTtsUrl, norm_url);
+    store_->SetString(kKeyNotifyTtsToken, tts_token.empty() ? cur.tts_token : tts_token);
+    store_->SetString(kKeyNotifyTtsVoice, tts_voice.empty() ? cur.tts_voice : tts_voice);
+    store_->SetString(kKeyNotifyTtsFormat, final_format);
+    return true;
+}
+
 #ifdef ESP_PLATFORM
 class SettingsKeyValueStore : public KeyValueStore {
 public:
@@ -383,7 +484,36 @@ std::shared_ptr<ServiceConfig> CreateDefaultServiceConfig() {
     bsz_kconfig.rotate_interval_s = CONFIG_WS185C_BESZEL_CAROUSEL_INTERVAL;
 #endif
 
-    config->SetKconfigDefaults(navi_kconfig, bsz_kconfig);
+    NotifyConfig notify_kconfig;
+#ifdef CONFIG_WS185C_NOTIFY_MQTT_HOST
+    notify_kconfig.mqtt_host = CONFIG_WS185C_NOTIFY_MQTT_HOST;
+#endif
+#ifdef CONFIG_WS185C_NOTIFY_MQTT_PORT
+    notify_kconfig.mqtt_port = CONFIG_WS185C_NOTIFY_MQTT_PORT;
+#endif
+#ifdef CONFIG_WS185C_NOTIFY_MQTT_USER
+    notify_kconfig.mqtt_user = CONFIG_WS185C_NOTIFY_MQTT_USER;
+#endif
+#ifdef CONFIG_WS185C_NOTIFY_MQTT_PASS
+    notify_kconfig.mqtt_pass = CONFIG_WS185C_NOTIFY_MQTT_PASS;
+#endif
+#ifdef CONFIG_WS185C_NOTIFY_MQTT_TOPIC
+    notify_kconfig.mqtt_topic = CONFIG_WS185C_NOTIFY_MQTT_TOPIC;
+#endif
+#ifdef CONFIG_WS185C_NOTIFY_TTS_URL
+    notify_kconfig.tts_base_url = CONFIG_WS185C_NOTIFY_TTS_URL;
+#endif
+#ifdef CONFIG_WS185C_NOTIFY_TTS_TOKEN
+    notify_kconfig.tts_token = CONFIG_WS185C_NOTIFY_TTS_TOKEN;
+#endif
+#ifdef CONFIG_WS185C_NOTIFY_TTS_VOICE
+    notify_kconfig.tts_voice = CONFIG_WS185C_NOTIFY_TTS_VOICE;
+#endif
+#ifdef CONFIG_WS185C_NOTIFY_TTS_FORMAT
+    notify_kconfig.tts_format = CONFIG_WS185C_NOTIFY_TTS_FORMAT;
+#endif
+
+    config->SetKconfigDefaults(navi_kconfig, bsz_kconfig, notify_kconfig);
     return config;
 }
 #endif

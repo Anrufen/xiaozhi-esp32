@@ -4,8 +4,6 @@
 #include "custom_lcd_display.h"
 
 #include <esp_log.h>
-#include <nvs_flash.h>
-#include <nvs.h>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -13,7 +11,6 @@
 namespace waveshare185c {
 
 static const char* TAG = "NotifyService";
-static const char* NVS_NAMESPACE = "notify_cfg";
 
 // 服务端 Mosquitto 自签 CA 证书 (SAN 包含 193.177.220.138)
 static const char kCaCertPem[] =
@@ -47,6 +44,7 @@ NotificationService::~NotificationService() {
 }
 
 void NotificationService::Initialize() {
+    service_config_ = CreateDefaultServiceConfig();
     LoadConfig();
 
     // 创建队列轮询轻量定时器（每 1 秒检查一次是否有积压待播通知）
@@ -66,31 +64,32 @@ void NotificationService::Initialize() {
 
 void NotificationService::Start() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (is_started_ || !enabled_) {
+    if (is_started_) {
         return;
     }
 
-    if (mqtt_host_.empty() || mqtt_port_ <= 0) {
-        ESP_LOGW(TAG, "MQTT host or port is invalid, skip start");
+    if (!config_.IsConfigured()) {
+        ESP_LOGW(TAG, "Notification channel not configured, skipping start");
         return;
     }
 
     ESP_LOGI(TAG, "Starting NotificationService, broker: %s:%d, topic: %s",
-             mqtt_host_.c_str(), mqtt_port_, mqtt_topic_.c_str());
+             config_.mqtt_host.c_str(), (int)config_.mqtt_port, config_.mqtt_topic.c_str());
 
     esp_mqtt_client_config_t mqtt_cfg = {};
-    mqtt_cfg.broker.address.hostname = mqtt_host_.c_str();
-    mqtt_cfg.broker.address.port = mqtt_port_;
-    mqtt_cfg.broker.address.transport = (mqtt_port_ == 8883) ? MQTT_TRANSPORT_OVER_SSL : MQTT_TRANSPORT_OVER_TCP;
-    
-    if (mqtt_port_ == 8883) {
+    mqtt_cfg.broker.address.hostname = config_.mqtt_host.c_str();
+    mqtt_cfg.broker.address.port = config_.mqtt_port;
+    mqtt_cfg.broker.address.transport =
+        config_.UsesTls() ? MQTT_TRANSPORT_OVER_SSL : MQTT_TRANSPORT_OVER_TCP;
+
+    if (config_.UsesTls()) {
         mqtt_cfg.broker.verification.certificate = kCaCertPem;
         mqtt_cfg.broker.verification.skip_cert_common_name_check = true;
     }
 
-    if (!mqtt_user_.empty()) {
-        mqtt_cfg.credentials.username = mqtt_user_.c_str();
-        mqtt_cfg.credentials.authentication.password = mqtt_pass_.c_str();
+    if (!config_.mqtt_user.empty()) {
+        mqtt_cfg.credentials.username = config_.mqtt_user.c_str();
+        mqtt_cfg.credentials.authentication.password = config_.mqtt_pass.c_str();
     }
 
     std::string client_id = "xiaozhi-" + Board::GetInstance().GetUuid().substr(0, 8);
@@ -158,11 +157,11 @@ void NotificationService::MqttEventHandler(void* handler_args, esp_event_base_t 
 void NotificationService::HandleMqttConnected() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     is_connected_ = true;
-    ESP_LOGI(TAG, "MQTT Connected to %s:%d", mqtt_host_.c_str(), mqtt_port_);
+    ESP_LOGI(TAG, "MQTT Connected to %s:%d", config_.mqtt_host.c_str(), (int)config_.mqtt_port);
 
-    if (!mqtt_topic_.empty() && mqtt_client_) {
-        int msg_id = esp_mqtt_client_subscribe(mqtt_client_, mqtt_topic_.c_str(), 1);
-        ESP_LOGI(TAG, "Subscribed to %s, msg_id=%d", mqtt_topic_.c_str(), msg_id);
+    if (!config_.mqtt_topic.empty() && mqtt_client_) {
+        int msg_id = esp_mqtt_client_subscribe(mqtt_client_, config_.mqtt_topic.c_str(), 1);
+        ESP_LOGI(TAG, "Subscribed to %s, msg_id=%d", config_.mqtt_topic.c_str(), msg_id);
     }
 }
 
@@ -314,32 +313,35 @@ std::string NotificationService::UrlEncode(const std::string& value) {
 
 std::string NotificationService::BuildTtsUrl(const std::string& text) {
     std::string encoded = UrlEncode(text);
-    std::string url = tts_base_url_;
+    std::string url = config_.tts_base_url;
     if (url.find('?') == std::string::npos) {
         url += "?";
     } else {
         url += "&";
     }
     url += "text=" + encoded;
-    if (!tts_token_.empty()) {
-        url += "&token=" + UrlEncode(tts_token_);
+    if (!config_.tts_token.empty()) {
+        url += "&token=" + UrlEncode(config_.tts_token);
     }
-    if (!tts_voice_.empty()) {
-        url += "&voice=" + UrlEncode(tts_voice_);
+    if (!config_.tts_voice.empty()) {
+        url += "&voice=" + UrlEncode(config_.tts_voice);
     }
-    // 请求 fmt=opus：Edge-TTS 实时返回 audio/ogg (Opus)，小智原生解码器无需额外重转码
-    url += "&fmt=opus";
+    if (!config_.tts_format.empty()) {
+        url += "&fmt=" + UrlEncode(config_.tts_format);
+    }
     return url;
 }
 
 std::string NotificationService::GetStatusJson() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "enabled", enabled_);
+    cJSON_AddBoolToObject(root, "configured", config_.IsConfigured());
     cJSON_AddBoolToObject(root, "connected", is_connected_);
-    cJSON_AddStringToObject(root, "broker", (mqtt_host_ + ":" + std::to_string(mqtt_port_)).c_str());
-    cJSON_AddStringToObject(root, "topic", mqtt_topic_.c_str());
-    cJSON_AddStringToObject(root, "tts_voice", tts_voice_.c_str());
+    cJSON_AddStringToObject(root, "broker",
+                            (config_.mqtt_host + ":" + std::to_string(config_.mqtt_port)).c_str());
+    cJSON_AddStringToObject(root, "topic", config_.mqtt_topic.c_str());
+    cJSON_AddStringToObject(root, "tts_voice", config_.tts_voice.c_str());
+    cJSON_AddStringToObject(root, "tts_format", config_.tts_format.c_str());
     cJSON_AddNumberToObject(root, "queue_size", (int)queue_.size());
 
     char* printed = cJSON_PrintUnformatted(root);
@@ -357,77 +359,40 @@ bool NotificationService::TestNotify(const std::string& text) {
     return true;
 }
 
-bool NotificationService::SetConfig(const std::string& host, int port, const std::string& user,
-                                    const std::string& pass, const std::string& topic,
-                                    const std::string& tts_url, const std::string& tts_token,
-                                    const std::string& tts_voice) {
+bool NotificationService::SetConfig(const NotifyConfig& new_config) {
+    if (!service_config_) {
+        ESP_LOGE(TAG, "Notification channel not initialized");
+        return false;
+    }
+
+    NotifyConfig cur = service_config_->GetNotifyConfig();
+    std::string err_msg;
+    if (!service_config_->SetNotifyConfig(new_config.mqtt_host, new_config.mqtt_port,
+                                          new_config.mqtt_user, new_config.mqtt_pass,
+                                          new_config.mqtt_topic, new_config.tts_base_url,
+                                          new_config.tts_token, new_config.tts_voice,
+                                          new_config.tts_format, err_msg)) {
+        ESP_LOGE(TAG, "Failed to persist notification config: %s", err_msg.c_str());
+        return false;
+    }
+
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (!host.empty()) mqtt_host_ = host;
-        if (port > 0) mqtt_port_ = port;
-        if (!user.empty()) mqtt_user_ = user;
-        if (!pass.empty()) mqtt_pass_ = pass;
-        if (!topic.empty()) mqtt_topic_ = topic;
-        if (!tts_url.empty()) tts_base_url_ = tts_url;
-        if (!tts_token.empty()) tts_token_ = tts_token;
-        if (!tts_voice.empty()) tts_voice_ = tts_voice;
+        config_ = service_config_->GetNotifyConfig();
     }
-    SaveConfig();
 
-    // 重新连接生效
+    ESP_LOGI(TAG, "Notification config updated, reconnecting...");
     Stop();
     Start();
+
+    (void)cur;
     return true;
 }
 
 void NotificationService::LoadConfig() {
-    nvs_handle_t handle;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
-        return;
+    if (service_config_) {
+        config_ = service_config_->GetNotifyConfig();
     }
-
-    auto read_str = [handle](const char* key, std::string& out) {
-        size_t len = 0;
-        if (nvs_get_str(handle, key, nullptr, &len) == ESP_OK && len > 1) {
-            std::vector<char> buf(len);
-            if (nvs_get_str(handle, key, buf.data(), &len) == ESP_OK) {
-                out = std::string(buf.data());
-            }
-        }
-    };
-
-    read_str("mqtt_host", mqtt_host_);
-    int32_t port = 0;
-    if (nvs_get_i32(handle, "mqtt_port", &port) == ESP_OK && port > 0) {
-        mqtt_port_ = port;
-    }
-    read_str("mqtt_user", mqtt_user_);
-    read_str("mqtt_pass", mqtt_pass_);
-    read_str("mqtt_topic", mqtt_topic_);
-    read_str("tts_url", tts_base_url_);
-    read_str("tts_token", tts_token_);
-    read_str("tts_voice", tts_voice_);
-
-    nvs_close(handle);
-}
-
-void NotificationService::SaveConfig() {
-    nvs_handle_t handle;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
-        return;
-    }
-
-    nvs_set_str(handle, "mqtt_host", mqtt_host_.c_str());
-    nvs_set_i32(handle, "mqtt_port", mqtt_port_);
-    nvs_set_str(handle, "mqtt_user", mqtt_user_.c_str());
-    nvs_set_str(handle, "mqtt_pass", mqtt_pass_.c_str());
-    nvs_set_str(handle, "mqtt_topic", mqtt_topic_.c_str());
-    nvs_set_str(handle, "tts_url", tts_base_url_.c_str());
-    nvs_set_str(handle, "tts_token", tts_token_.c_str());
-    nvs_set_str(handle, "tts_voice", tts_voice_.c_str());
-
-    nvs_commit(handle);
-    nvs_close(handle);
 }
 
 } // namespace waveshare185c

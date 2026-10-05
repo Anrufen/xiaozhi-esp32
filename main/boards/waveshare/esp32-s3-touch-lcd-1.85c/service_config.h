@@ -34,6 +34,23 @@ struct BeszelConfig {
     bool IsConfigured() const { return !url.empty() && !user.empty() && !pass.empty(); }
 };
 
+struct NotifyConfig {
+    std::string mqtt_host;
+    int32_t mqtt_port = 8883;
+    std::string mqtt_user;
+    std::string mqtt_pass;
+    std::string mqtt_topic;
+    std::string tts_base_url;
+    std::string tts_token;
+    std::string tts_voice;
+    std::string tts_format = "opus";
+
+    bool IsConfigured() const {
+        return !mqtt_host.empty() && mqtt_port > 0 && !mqtt_topic.empty() && !tts_base_url.empty();
+    }
+    bool UsesTls() const { return mqtt_port == 8883; }
+};
+
 class ServiceConfig {
 public:
     // NVS 命名空间与键名定义 (持久化 API, <=15 字符)
@@ -46,11 +63,22 @@ public:
     static constexpr const char* kKeyBszPass = "bsz_pass";
     static constexpr const char* kKeyBszFetch = "bsz_fetch_s";
     static constexpr const char* kKeyBszRotate = "bsz_rotate_s";
+    static constexpr const char* kKeyNotifyMqttHost = "ntf_mqtt_host";
+    static constexpr const char* kKeyNotifyMqttPort = "ntf_mqtt_port";
+    static constexpr const char* kKeyNotifyMqttUser = "ntf_mqtt_user";
+    static constexpr const char* kKeyNotifyMqttPass = "ntf_mqtt_pass";
+    static constexpr const char* kKeyNotifyMqttTopic = "ntf_mqtt_topic";
+    static constexpr const char* kKeyNotifyTtsUrl = "ntf_tts_url";
+    static constexpr const char* kKeyNotifyTtsToken = "ntf_tts_token";
+    static constexpr const char* kKeyNotifyTtsVoice = "ntf_tts_voice";
+    static constexpr const char* kKeyNotifyTtsFormat = "ntf_tts_fmt";
 
     static constexpr int32_t kDefaultBszFetchInterval = 15;
     static constexpr int32_t kDefaultBszRotateInterval = 5;
+    static constexpr int32_t kDefaultNotifyMqttPort = 8883;
     static constexpr int32_t kMinInterval = 1;
     static constexpr int32_t kMaxInterval = 86400;
+    static constexpr const char* kDefaultNotifyTtsFormat = "opus";
 
     explicit ServiceConfig(std::shared_ptr<KeyValueStore> store);
 
@@ -74,7 +102,8 @@ public:
                                                   bool for_dlna = true);
 
     // 设置编译期默认值（回退底色）
-    void SetKconfigDefaults(const NavidromeConfig& navi, const BeszelConfig& bsz);
+    void SetKconfigDefaults(const NavidromeConfig& navi, const BeszelConfig& bsz,
+                            const NotifyConfig& notify);
 
     // Navidrome 配置存取
     NavidromeConfig GetNavidromeConfig() const;
@@ -86,6 +115,14 @@ public:
     bool SetBeszelConfig(const std::string& url, const std::string& user, const std::string& pass,
                          int32_t fetch_interval_s, int32_t rotate_interval_s, std::string& err_msg);
 
+    // 主动通知通道配置存取（空字符串参数表示保留当前值）
+    NotifyConfig GetNotifyConfig() const;
+    bool SetNotifyConfig(const std::string& mqtt_host, int32_t mqtt_port,
+                         const std::string& mqtt_user, const std::string& mqtt_pass,
+                         const std::string& mqtt_topic, const std::string& tts_base_url,
+                         const std::string& tts_token, const std::string& tts_voice,
+                         const std::string& tts_format, std::string& err_msg);
+
     // 辅助：获取底层存储
     std::shared_ptr<KeyValueStore> GetStore() const { return store_; }
 
@@ -93,6 +130,7 @@ private:
     std::shared_ptr<KeyValueStore> store_;
     NavidromeConfig kconfig_navi_defaults_;
     BeszelConfig kconfig_bsz_defaults_;
+    NotifyConfig kconfig_notify_defaults_;
 };
 
 #ifdef ESP_PLATFORM
