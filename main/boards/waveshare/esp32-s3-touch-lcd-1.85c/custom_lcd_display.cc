@@ -799,35 +799,38 @@ void CustomLcdDisplay::UpdateWakeupVuAnimation() {
     }
 
     // 如果当前切到了文本播报模式（vu_container 隐藏），暂停频谱计算
-    if (!wakeup_vu_container_ || lv_obj_has_flag(wakeup_vu_container_, LV_OBJ_FLAG_HIDDEN)) {
-        return;
-    }
+    if (wakeup_vu_container_ && !lv_obj_has_flag(wakeup_vu_container_, LV_OBJ_FLAG_HIDDEN)) {
+        float base = sinf(phase) * 0.4f + 0.6f;
+        for (int i = 0; i < 10; ++i) {
+            if (!wakeup_vu_bars_[i])
+                continue;
+            float noise = sinf(phase * 2.0f + i * 0.8f) * 0.5f + 0.5f;
+            int h = (int)(noise * base * 16.0f);
+            if (h < 4)
+                h = 4;
+            if (h > 20)
+                h = 20;
 
-    float base = sinf(phase) * 0.4f + 0.6f;
-    for (int i = 0; i < 10; ++i) {
-        if (!wakeup_vu_bars_[i])
-            continue;
-        float noise = sinf(phase * 2.0f + i * 0.8f) * 0.5f + 0.5f;
-        int h = (int)(noise * base * 16.0f);
-        if (h < 4)
-            h = 4;
-        if (h > 20)
-            h = 20;
+            lv_obj_set_height(wakeup_vu_bars_[i], h);
+            lv_obj_set_y(wakeup_vu_bars_[i], 32 - h);
 
-        lv_obj_set_height(wakeup_vu_bars_[i], h);
-        lv_obj_set_y(wakeup_vu_bars_[i], 32 - h);
-
-        if (h > 14) {
-            lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x00D2FF), 0);
-        } else if (h > 8) {
-            lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x4EDEA3), 0);
-        } else {
-            lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x31353E), 0);
+            if (h > 14) {
+                lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x00D2FF), 0);
+            } else if (h > 8) {
+                lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x4EDEA3), 0);
+            } else {
+                lv_obj_set_style_bg_color(wakeup_vu_bars_[i], lv_color_hex(0x31353E), 0);
+            }
         }
     }
 
-    // 检查语音活动：如果在等待输入阶段检测到语音正在输入，倒计时立即停止并从界面消失！
-    if (auto_hide_seconds_left_ > 0 && !voice_input_detected_) {
+    // 检查语音活动：待机等待期用户直接开口说话时，倒计时立即停止、HUD 不该消失。
+    // 但必须等倒计时真的走起来（已经递减过至少一秒）才允许取消：
+    // 对话刚结束时 EnableWakeWordDetection 会立刻启用唤醒词引擎，麦克风里还回响着
+    // 助手最后那句 TTS 的尾音，VAD 随即报 speaking=true，会把刚启动的倒计时误杀，
+    // 于是屏幕永远停在「回答完毕」不再自动退出。
+    if (auto_hide_seconds_left_ > 0 && auto_hide_seconds_left_ < countdown_start_seconds_ &&
+        !voice_input_detected_) {
         if (Application::GetInstance().GetAudioService().IsVoiceDetected()) {
             voice_input_detected_ = true;
             StopCountdown();
@@ -837,6 +840,7 @@ void CustomLcdDisplay::UpdateWakeupVuAnimation() {
 
 void CustomLcdDisplay::StartCountdown(int seconds) {
     auto_hide_seconds_left_ = seconds > 0 ? seconds : 10;
+    countdown_start_seconds_ = auto_hide_seconds_left_;
     if (countdown_timer_) {
         lv_timer_reset(countdown_timer_);
         lv_timer_resume(countdown_timer_);
@@ -849,6 +853,7 @@ void CustomLcdDisplay::StopCountdown() {
         lv_timer_pause(countdown_timer_);
     }
     auto_hide_seconds_left_ = 0;
+    countdown_start_seconds_ = 0;
     UpdateCountdownDisplay();
 }
 
@@ -1013,7 +1018,9 @@ void CustomLcdDisplay::SetStatus(const char* status) {
         // 回到待机即本轮对话结束，无论上一轮是按键还是唤醒词唤醒，
         // 都恢复唤醒词路径需要的静默倒计时
         countdown_enabled_ = true;
-        StartCountdown(10);
+        // 倒计时的实际启动统一交给 ClearChatMessages()（application.cc 的 idle
+        // 分支紧接着就会调它）。这里不再重复 StartCountdown(10)，否则倒计时会被
+        // 重置两次，改动时容易只改到一处。
 
         if (led_eye_left_ && led_eye_right_) {
             lv_obj_set_style_bg_color(led_eye_left_, lv_color_hex(0x859399), 0);
@@ -1154,6 +1161,7 @@ void CustomLcdDisplay::ClearChatMessages() {
         lv_label_set_text(wakeup_icon_label_, MATERIAL_SYMBOLS_CHECK_CIRCLE);
     }
     voice_input_detected_ = false;
+    countdown_enabled_ = true;
     StartCountdown(10);
 }
 

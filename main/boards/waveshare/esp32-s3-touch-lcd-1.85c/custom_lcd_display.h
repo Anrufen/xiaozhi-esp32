@@ -381,6 +381,9 @@ private:
     lv_timer_t* wakeup_timer_ = nullptr;     // 40ms 高帧率律动定时器
     lv_timer_t* countdown_timer_ = nullptr;  // 1s 真实倒计时定时器
     int auto_hide_seconds_left_ = 0;
+    // 本轮倒计时的起始值。用来判断倒计时是否已经真的在走：
+    // 只有已经递减过的倒计时才允许被 VAD 取消，刚启动的那一秒不算。
+    int countdown_start_seconds_ = 0;
     std::string current_title_base_ = "正在聆听";
     // 倒计时只服务于「唤醒词后没说话」的静默兜底。BOOT 键是显式意图，
     // 走按键唤醒时置 false，避免 HUD 在收音途中凭空消失。
