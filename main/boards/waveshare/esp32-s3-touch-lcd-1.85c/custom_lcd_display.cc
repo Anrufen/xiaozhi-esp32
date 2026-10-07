@@ -594,7 +594,16 @@ void CustomLcdDisplay::SetupWakeupOverlay() {
                     self->UpdateCountdownDisplay();
                     if (self->auto_hide_seconds_left_ <= 0) {
                         self->StopCountdown();
-                        self->HideWakeupOverlay();
+                        // 倒计时归零 = 本轮静默超时。若还在拾音，按状态图的
+                        // listening -> idle「超时」路径真正结束会话回到待机，
+                        // 让唤醒词重新上岗；只收 HUD 会把设备卡在 listening：
+                        // 麦克风常开、WakeNet 被占，用户看着桌面却喊不醒。
+                        auto& app = Application::GetInstance();
+                        if (app.GetDeviceState() == kDeviceStateListening) {
+                            app.StopListening();
+                        } else {
+                            self->HideWakeupOverlay();
+                        }
                     }
                 }
             }
@@ -979,6 +988,9 @@ void CustomLcdDisplay::SetStatus(const char* status) {
         ShowWakeupOverlay();
         voice_input_detected_ = true;
         StopCountdown();
+        // 助手已开口，BOOT 键按下时那点「握手窗口」早过去了：恢复静默倒计时，
+        // 否则按键唤醒的会话答完后会永远停在「正在聆听」，等不到超时退出。
+        countdown_enabled_ = true;
         current_title_base_ = "正在回答";
         const lv_font_t* f16 = GetMainTextFont16();
         if (wakeup_title_label_) {
@@ -1070,6 +1082,9 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
     if (r == "user") {
         voice_input_detected_ = true;
         StopCountdown();
+        // 用户真的开口了（服务端回传了 STT 文本），说明音频通道握手完成、
+        // BOOT 键的「初始静默窗口」已过：恢复静默倒计时，让本轮答完能超时退出。
+        countdown_enabled_ = true;
         assistant_stream_text_.clear();
         is_new_assistant_turn_ = true;
 
